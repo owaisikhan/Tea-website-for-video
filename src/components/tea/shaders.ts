@@ -7,8 +7,10 @@ const worldVert = /* glsl */ `
   varying vec3 vWorld;
   varying vec3 vNormal;
   varying vec2 vUv;
+  varying vec3 vLocal;
   void main() {
     vUv = uv;
+    vLocal = position;
     vec4 w = modelMatrix * vec4(position, 1.0);
     vWorld = w.xyz;
     vNormal = normalize(mat3(modelMatrix) * normal);
@@ -68,6 +70,22 @@ const env = /* glsl */ `
   }
 `;
 
+// Parts that join the pot body (spout, handle, the tea in the spout) are trimmed where they
+// pass inside it, so the joins look clean through the glass. Geometry is in pot space.
+const clip = /* glsl */ `
+  uniform float uClip;
+  uniform float uClipProfile[32];
+  uniform float uClipTop;
+  varying vec3 vLocal;
+  void clipInsideBody() {
+    if (uClip < 0.5 || vLocal.y > uClipTop) return;
+    float f = clamp(vLocal.y / uClipTop, 0.0, 1.0) * 31.0;
+    int i = int(floor(f));
+    int j = min(i + 1, 31);
+    if (length(vLocal.xz) < mix(uClipProfile[i], uClipProfile[j], fract(f))) discard;
+  }
+`;
+
 // Screen-space helpers shared by everything that refracts.
 const screen = /* glsl */ `
   uniform sampler2D uScene;
@@ -89,7 +107,9 @@ export const glassShader = {
     varying vec3 vNormal;
     ${env}
     ${screen}
+    ${clip}
     void main() {
+      clipInsideBody();
       vec3 N = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
       // Hand-blown glass is never perfectly even: a faint waviness bends the reflections.
       vec3 wv = sin(vWorld.yzx * vec3(7.1, 9.3, 8.7) + sin(vWorld.zxy * 5.3) * 1.7);
@@ -142,7 +162,9 @@ export const liquidShader = {
     varying vec3 vNormal;
     ${env}
     ${screen}
+    ${clip}
     void main() {
+      clipInsideBody();
       float wave = sin(vWorld.x * 7.0 + uTime * 2.2) * 0.012 + sin(vWorld.z * 9.0 - uTime * 1.7) * 0.01
         + sin((vWorld.x + vWorld.z) * 15.0 + uTime * 3.1) * 0.004;
       float lvl = uLevel + wave * (0.4 + uWave);

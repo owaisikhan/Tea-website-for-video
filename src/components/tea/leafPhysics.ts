@@ -22,7 +22,11 @@ export type SimInput = {
   seed: number;
   mouth: (t: number, out: Mouth) => void; // pouch opening at simulated time t
   swirl: (t: number) => number; // current strength 0..1 at time t
-  level: number; // water surface height
+  // Pot tilt (rotation about z, radians) and the water surface's height along world-up,
+  // both measured in the pot's own frame, which is where the whole simulation runs.
+  // When the pot tips to pour, gravity and the surface tilt with respect to it.
+  tilt: (t: number) => number;
+  level: (t: number) => number;
   floorY: number; // inside floor of the pot
   rimY: number; // top of the pot wall
   wallRadius: (y: number) => number; // inner wall radius at height y
@@ -63,6 +67,7 @@ export function simulateLeaves(inp: SimInput): SimResult {
 
   const mouth: Mouth = { pos: new THREE.Vector3(), dir: new THREE.Vector3(), side: new THREE.Vector3() };
   const up = new THREE.Vector3(0, 1, 0);
+  const upL = new THREE.Vector3(0, 1, 0);
   const normal = new THREE.Vector3();
   const tmp = new THREE.Vector3();
   const current = new THREE.Vector3();
@@ -74,6 +79,10 @@ export function simulateLeaves(inp: SimInput): SimResult {
     for (let s = 0; s < (f === 0 ? 1 : steps); s++) {
       if (f > 0) t += dt;
       const S = inp.swirl(t);
+      const theta = inp.tilt(t);
+      upL.set(Math.sin(theta), Math.cos(theta), 0);
+      const lvl = inp.level(t);
+      const upright = theta < 0.03;
       for (let i = 0; i < n; i++) {
         if (!spawned[i]) {
           if (t < inp.release[i]) {
@@ -100,7 +109,8 @@ export function simulateLeaves(inp: SimInput): SimResult {
         const vel = v[i];
         const r = Math.hypot(x.x, x.z);
         const inPot = x.y < inp.rimY && r < inp.wallRadius(Math.max(x.y, inp.floorY)) + 0.02;
-        const inWater = inPot && x.y < inp.level;
+        const height = x.dot(upL);
+        const inWater = inPot && height < lvl;
 
         if (inWater && !wet[i]) {
           // Splash: the surface soaks up most of the fall.
@@ -112,18 +122,31 @@ export function simulateLeaves(inp: SimInput): SimResult {
 
         if (!inWater) {
           // Air: gravity and drag, plus a flutter that glides the leaf along its tilt.
-          vel.y -= G * dt;
+          vel.addScaledVector(upL, -G * dt);
           vel.addScaledVector(vel, -P.airDrag * dt);
+          const flutter = wet[i] ? 0 : P.flutter;
           normal.set(0, 0, 1).applyQuaternion(q[i]);
-          const glide = Math.sin(phase[i] + t * freq[i]) * P.flutter * Math.min(1, Math.abs(vel.y));
+          const vUp = vel.dot(upL);
+          const glide = Math.sin(phase[i] + t * freq[i]) * flutter * Math.min(1, Math.abs(vUp));
           vel.x += normal.x * glide * dt * 3;
           vel.z += normal.z * glide * dt * 3;
           // Broad leaves resist falling flat-side down.
-          vel.y += Math.abs(normal.y) * P.flutter * 0.25 * Math.max(0, -vel.y) * dt * 3;
-          // Leaves above the pot drift toward its opening (the pour is aimed at it).
-          if (x.y < inp.rimY + 1.2 && x.y > inp.rimY - 0.1) {
-            vel.x -= x.x * 1.4 * dt;
-            vel.z -= x.z * 1.4 * dt;
+          vel.addScaledVector(upL, Math.abs(normal.dot(upL)) * flutter * 0.25 * Math.max(0, -vUp) * dt * 3);
+          // The pour is aimed at the middle of the pot: anything falling toward it is guided
+          // to the centre of the opening, well clear of the collar and the glass.
+          if (upright && !wet[i] && x.y < inp.rimY + 2.6 && x.y > inp.rimY - 0.3) {
+            vel.x -= x.x * 3 * dt;
+            vel.z -= x.z * 3 * dt;
+            const damp = Math.exp(-1.5 * dt);
+            vel.x *= damp;
+            vel.z *= damp;
+            const rNow = Math.hypot(x.x, x.z);
+            const lim = 0.48;
+            if (x.y < inp.rimY + 0.7 && rNow > lim) {
+              const k = THREE.MathUtils.lerp(1, lim / rNow, 0.25);
+              x.x *= k;
+              x.z *= k;
+            }
           }
           tmp.copy(spinAxis[i]).multiplyScalar(P.spin * (0.6 + 0.4 * Math.sin(phase[i] + t * freq[i] * 0.5)));
           w[i].lerp(tmp, Math.min(1, dt * 2));
@@ -137,9 +160,9 @@ export function simulateLeaves(inp: SimInput): SimResult {
           const tz = r > 1e-4 ? x.x / r : 0;
           const spinSpeed = S * 1.5 * (r / (r + 0.25));
           const rise = S * (0.9 * (1 - rr * 1.6));
-          const radial = S * 0.5 * (x.y / inp.level - 0.55);
+          const radial = S * 0.5 * (x.y / Math.max(0.3, lvl) - 0.55);
           current.set(tx * spinSpeed + (r > 1e-4 ? (x.x / r) * radial : 0), rise, tz * spinSpeed + (r > 1e-4 ? (x.z / r) * radial : 0));
-          vel.y += -G * (1 - buoy) * 0.55 * dt;
+          vel.addScaledVector(upL, -G * (1 - buoy) * 0.55 * dt);
           vel.addScaledVector(tmp.copy(current).sub(vel), Math.min(1, P.waterDrag * dt));
           // Slow tumbling in water, stirred by the current.
           w[i].multiplyScalar(Math.exp(-2.2 * dt));
@@ -150,12 +173,14 @@ export function simulateLeaves(inp: SimInput): SimResult {
         x.addScaledVector(vel, dt);
 
         // Surface: floating leaves rest on it and turn flat.
-        const surf = inp.level - 0.012;
-        if (wet[i] && x.y > surf) {
-          x.y = surf;
-          if (vel.y > 0) vel.y = 0;
+        const surf = lvl - 0.012;
+        const hNow = x.dot(upL);
+        if (wet[i] && inPot && hNow > surf && hNow < surf + 0.12) {
+          x.addScaledVector(upL, surf - hNow);
+          const vu = vel.dot(upL);
+          if (vu > 0) vel.addScaledVector(upL, -vu);
           normal.set(0, 0, 1).applyQuaternion(q[i]);
-          flat.setFromUnitVectors(normal, normal.y >= 0 ? up : tmp.set(0, -1, 0)).multiply(q[i]);
+          flat.setFromUnitVectors(normal, normal.dot(upL) >= 0 ? upL : tmp.copy(upL).negate()).multiply(q[i]);
           q[i].slerp(flat, Math.min(1, dt * 4));
           w[i].multiplyScalar(Math.exp(-4 * dt));
         }
@@ -190,10 +215,6 @@ export function simulateLeaves(inp: SimInput): SimResult {
           normal.set(0, 0, 1).applyQuaternion(q[i]);
           flat.setFromUnitVectors(normal, normal.y >= 0 ? up : tmp.set(0, -1, 0)).multiply(q[i]);
           q[i].slerp(flat, Math.min(1, dt * 2));
-        }
-        if (x.y < 0.02) {
-          x.y = 0.02;
-          vel.set(0, 0, 0);
         }
 
         // Integrate orientation.

@@ -380,7 +380,6 @@ export function buildLeafSet(): LeafSet {
     { name: "petal", count: 30, liteCount: 16, size: [0.14, 0.2], physics: P(3.6, 2.1, 5, 1.2, 0.015, 5.5), geometry: blade({ width: 0.55, fold: 0.1, curl: 0.45, twist: 0.2, segs: 10 }), material: cut(petalTex, 0.6) },
     { name: "mint", count: 18, liteCount: 10, size: [0.26, 0.36], physics: P(2.9, 1.8, 4, 1.15, 0.05, 5), geometry: mintGeometry, material: cut(mintTex, 0.45) },
     { name: "ginger slice", count: 10, liteCount: 6, size: [0.2, 0.28], physics: P(1.3, 0.5, 5, 0.9, 0, 3), geometry: gingerSlice(), material: gingerSliceMats },
-    { name: "ginger", count: 2, liteCount: 1, size: [0.42, 0.5], physics: P(0.8, 0.05, 3, 0.85, 0, 2.5), geometry: gingerSlice(), material: gingerSliceMats },
     { name: "cinnamon", count: 3, liteCount: 2, size: [0.55, 0.7], physics: P(1.0, 0.2, 3, 1.08, 0.01, 3), geometry: cinnamon(), material: std({ map: bark, bumpMap: bark, bumpScale: 3, roughness: 0.75, side: THREE.DoubleSide }) },
     { name: "star anise", count: 5, liteCount: 3, size: [0.26, 0.32], physics: P(1.4, 0.4, 5, 1.06, 0.01, 3.5), geometry: starAnise(), material: std({ color: 0x5a2a14, roughness: 0.7 }) },
     { name: "cardamom", count: 14, liteCount: 8, size: [0.12, 0.16], physics: P(1.0, 0.1, 7, 1.02, 0.02, 3), geometry: cardamom(), material: std({ color: 0x8a9a52, roughness: 0.65 }) },

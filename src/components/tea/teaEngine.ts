@@ -6,7 +6,6 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { HDRLoader } from "three/examples/jsm/loaders/HDRLoader.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clamp01, phases, pourFlow, range, smoothstep, teaCenter } from "@/lib/teaTimeline";
 import { buildLeafSet, type LeafSet } from "./leafModels";
 import { simulateLeaves, type Mouth, type SimResult } from "./leafPhysics";
@@ -70,8 +69,8 @@ const CUP_SCALE = 1.3;
 
 // Leaf physics runs over this slice of the scroll, as SIM_SECONDS of simulated time.
 const SIM_P0 = 0.2;
-const SIM_P1 = 0.68;
-const SIM_SECONDS = 8;
+const SIM_P1 = 1;
+const SIM_SECONDS = 13.3;
 const simTime = (p: number) => ((p - SIM_P0) / (SIM_P1 - SIM_P0)) * SIM_SECONDS;
 const simProgress = (t: number) => SIM_P0 + (t / SIM_SECONDS) * (SIM_P1 - SIM_P0);
 const WATER_LEVEL = 0.95;
@@ -129,10 +128,19 @@ function radiusAt(profile: [number, number][], y: number) {
   return profile[profile.length - 1][0];
 }
 
+/** Outer radius of the pot body sampled for the trimming in `clipInsideBody` (shaders.ts). */
+const CLIP_TOP = 1.8;
+const CLIP_PROFILE = Array.from({ length: 32 }, (_, i) => radiusAt(POT_OUTER, (i / 31) * CLIP_TOP) - 0.004);
+const clipUniforms = (on: boolean) => ({
+  uClip: { value: on ? 1 : 0 },
+  uClipProfile: { value: CLIP_PROFILE },
+  uClipTop: { value: CLIP_TOP },
+});
+
 function glassPair(
   geo: THREE.BufferGeometry,
   shared: Shared,
-  { glow = new THREE.Color(0.12, 0.07, 0.025), refract = 0.05, opacity = 1 } = {},
+  { glow = new THREE.Color(0.12, 0.07, 0.025), refract = 0.05, opacity = 1, clip = false } = {},
 ) {
   const make = (side: THREE.Side, order: number) => {
     const m = new THREE.ShaderMaterial({
@@ -142,6 +150,7 @@ function glassPair(
         uOpacity: { value: opacity },
         uRefract: { value: refract },
         uGlow: { value: glow },
+        ...clipUniforms(clip),
       },
       transparent: true,
       depthWrite: false,
@@ -164,6 +173,7 @@ function liquidPair(geo: THREE.BufferGeometry, shared: Shared, thick: number) {
     uWave: { value: 0 },
     uOpacity: { value: 1 },
     uThick: { value: thick },
+    ...clipUniforms(false),
   };
   const make = (side: THREE.Side, order: number) => {
     const m = new THREE.ShaderMaterial({
@@ -264,6 +274,23 @@ function rng(seed: number) {
 
 type LeafInstance = { kind: number; index: number; size: number; release: number };
 
+/** The pot's pour motion and water level over the scroll, shared by the scene and the physics. */
+function potState(p: number) {
+  const pour = range(p, 0.72, 0.86);
+  const lift = smoothstep(0, 0.4, pour);
+  const tip = smoothstep(0.25, 0.6, pour);
+  const calm = smoothstep(0.86, 0.98, p);
+  const localLevel = WATER_LEVEL - tip * 0.12 - calm * 0.05;
+  return {
+    lift,
+    tip,
+    angle: tip * 0.72,
+    localLevel,
+    // Height of the water surface above the pot's origin, along world-up.
+    levelAbove: localLevel - tip * 0.35,
+  };
+}
+
 /** Pouch pose over the scroll. `t` only adds a gentle hover and shake on the live site. */
 function pouchPose(p: number, t: number, o: THREE.Object3D) {
   const ph = phases(p);
@@ -277,9 +304,14 @@ function pouchPose(p: number, t: number, o: THREE.Object3D) {
     THREE.MathUtils.lerp(8.5, 3.45, drop) + smoothstep(0.235, 0.38, p) * 1.3 + away * 6 + Math.sin(t * 1.1) * 0.03 * (t > 0 ? 1 : 0),
     0.1,
   );
-  // A small shake while leaves spill out.
-  const shake = Math.sin(p * 900) * 0.035 * pouring;
-  o.rotation.set(0.1, -0.35 + tip * 0.2, tip * 2.55 + shake);
+  // A slow, gentle sway while it empties (tied to the scroll, so it never jitters).
+  const sway = Math.sin((p - 0.23) * 45) * 0.04 * pouring;
+  o.rotation.set(0.1, -0.35 + tip * 0.2, tip * 2.55 + sway);
+  o.updateMatrixWorld();
+  // Keep the opening right above the middle of the pot while it pours.
+  const m = POUCH_MOUTH.clone().applyMatrix4(o.matrixWorld);
+  o.position.x -= m.x * tip;
+  o.position.z -= m.z * tip;
   o.updateMatrixWorld();
 }
 
@@ -430,11 +462,12 @@ export class TeaEngine {
       new THREE.Vector3(1.5, 0.45, 0),
       new THREE.Vector3(1.02, 0.42, 0),
     ], false, "centripetal");
-    const potParts: [THREE.BufferGeometry, { refract?: number; opacity?: number }][] = [
+    const spoutRadius = (t: number) => 0.072 + 0.2 * Math.pow(1 - t, 2.4);
+    const potParts: [THREE.BufferGeometry, { refract?: number; opacity?: number; clip?: boolean }][] = [
       [lathe(POT_SHELL, 1, 160), {}],
-      [taperedTube(spoutCurve, (t) => 0.072 + 0.2 * Math.pow(1 - t, 2.4)), {}],
+      [taperedTube(spoutCurve, spoutRadius), { clip: true }],
       [spoutLip, {}],
-      [taperedTube(handleCurve, (t) => 0.072 + 0.05 * Math.pow(Math.abs(t - 0.5) * 2, 3)), {}],
+      [taperedTube(handleCurve, (t) => 0.072 + 0.05 * Math.pow(Math.abs(t - 0.5) * 2, 3)), { clip: true }],
     ];
     for (const [g, opts] of potParts) {
       this.pot.add(...glassPair(g, this.shared, opts));
@@ -449,6 +482,18 @@ export class TeaEngine {
     this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.9);
     this.pot.add(...this.potLiquid.meshes);
     this.disposables.push(potLiquidGeo);
+    // Tea inside the spout. It shares the pot's water level (the spout and pot are one vessel),
+    // so it fills as the pot tips, and the stream only starts once it reaches the tip.
+    const spoutTeaGeo = taperedTube(spoutCurve, (t) => spoutRadius(t) * 0.8 - 0.008);
+    const spoutTeaUniforms = { ...this.potLiquid.uniforms, uThick: { value: 0.45 }, ...clipUniforms(true) };
+    for (const [side, order] of [[THREE.BackSide, 2], [THREE.FrontSide, 3]] as const) {
+      const m = new THREE.ShaderMaterial({ ...liquidShader, uniforms: spoutTeaUniforms, transparent: true, depthWrite: false, side });
+      const mesh = new THREE.Mesh(spoutTeaGeo, m);
+      mesh.renderOrder = order;
+      this.pot.add(mesh);
+      this.disposables.push(m);
+    }
+    this.disposables.push(spoutTeaGeo);
     this.scene.add(this.pot);
 
     // Ingredients: tea (rolled and whole leaves), petals, mint, ginger, cinnamon, star anise,
@@ -491,7 +536,8 @@ export class TeaEngine {
         out.side.set(1, 0, 0).transformDirection(pose.matrixWorld);
       },
       swirl: (t: number) => Math.sin(Math.PI * range(simProgress(t), 0.4, 0.62)),
-      level: WATER_LEVEL,
+      tilt: (t: number) => potState(simProgress(t)).angle,
+      level: (t: number) => potState(simProgress(t)).levelAbove,
       floorY: 0.14,
       rimY: 1.8,
       wallRadius: (y: number) => radiusAt(POT_INNER, Math.min(1.8, Math.max(0, y))),
@@ -745,17 +791,16 @@ export class TeaEngine {
   }
 
   /**
-   * Swap in the photographed assets once they arrive: an HDR studio for reflections,
-   * scanned walnut for the table and a scanned ginger root. Everything works without them.
+   * Swap in the photographed assets once they arrive: an HDR studio for reflections and
+   * scanned wood for the table. Everything works without them.
    */
   async loadAssets(base = "/assets") {
     const tex = new THREE.TextureLoader();
-    const [hdr, wood, nor, rough, ginger] = await Promise.allSettled([
+    const [hdr, wood, nor, rough] = await Promise.allSettled([
       new HDRLoader().setDataType(THREE.HalfFloatType).loadAsync(`${base}/hdri/studio_1k.hdr`),
       tex.loadAsync(`${base}/wood/dark_wood_diff_2k.jpg`),
       tex.loadAsync(`${base}/wood/dark_wood_nor_gl_1k.jpg`),
       tex.loadAsync(`${base}/wood/dark_wood_rough_1k.jpg`),
-      new GLTFLoader().loadAsync(`${base}/ginger/food_ginger_01_1k.gltf`),
     ]);
     if (hdr.status === "fulfilled") {
       const env = hdr.value;
@@ -787,30 +832,6 @@ export class TeaEngine {
       u.uWoodNor.value = nor.value;
       u.uWoodRough.value = rough.value;
       u.uWoodOn.value = 1;
-    }
-    if (ginger.status === "fulfilled") {
-      let found: THREE.Mesh | null = null;
-      ginger.value.scene.traverse((o) => {
-        if (!found && (o as THREE.Mesh).isMesh) found = o as THREE.Mesh;
-      });
-      const mesh = found as THREE.Mesh | null;
-      const kind = this.leafSet.ingredients.findIndex((i) => i.name === "ginger");
-      if (mesh && kind >= 0) {
-        // Centre the scan, lay its long axis along x and scale it to unit length.
-        const g = mesh.geometry.clone();
-        g.computeBoundingBox();
-        const box = g.boundingBox!;
-        const size = box.getSize(new THREE.Vector3());
-        g.translate(...box.getCenter(new THREE.Vector3()).negate().toArray());
-        if (size.y >= size.x && size.y >= size.z) g.rotateZ(Math.PI / 2);
-        else if (size.z >= size.x) g.rotateY(Math.PI / 2);
-        const k = 1 / Math.max(size.x, size.y, size.z);
-        g.scale(k, k, k);
-        const target = this.leafMeshes[kind];
-        target.geometry = g;
-        target.material = mesh.material as THREE.Material;
-        this.disposables.push(g, mesh.material as THREE.Material);
-      }
     }
   }
 
@@ -876,21 +897,23 @@ export class TeaEngine {
     this.camera.updateMatrixWorld();
 
     // Pot: lifts to the upper right and tips to pour.
-    const lift = smoothstep(0, 0.4, ph.pour);
-    const tilt = smoothstep(0.25, 0.6, ph.pour);
+    const pot = potState(p);
+    const lift = pot.lift;
+    const tilt = pot.tip;
     this.pot.position.set(0, 0, 0).lerp(POUR_POS, lift);
     this.pot.position.y += Math.sin(t * 0.8) * 0.015 * lift;
-    this.pot.rotation.z = tilt * 0.72 + Math.sin(t * 0.7) * 0.01 * tilt;
+    // No wobble on the tilt: the leaves are simulated against this exact angle.
+    this.pot.rotation.z = pot.angle;
     this.pot.updateMatrixWorld();
 
     // Pot liquid: level falls a little while pouring. The surface stays level in world space.
     const pl = this.potLiquid.uniforms;
-    const localLevel = WATER_LEVEL - tilt * 0.12 - ph.calm * 0.05;
-    pl.uLevel.value = this.pot.position.y + localLevel - tilt * 0.35;
+    const localLevel = pot.localLevel;
+    pl.uLevel.value = this.pot.position.y + pot.levelAbove;
     pl.uBottom.value = this.pot.position.y;
     pl.uBrew.value = ph.brew;
     pl.uTime.value = t;
-    pl.uWave.value = Math.sin(ph.stir * Math.PI) * 1.5 + tilt;
+    pl.uWave.value = Math.sin(ph.stir * Math.PI) * 0.3 + tilt * 0.2;
 
     // Pot surface: centred where the pot's axis crosses the water level, ripples where
     // ingredients landed, churning while it boils.
@@ -1003,7 +1026,9 @@ export class TeaEngine {
     this.mint.visible = cupIn > 0.001;
     this.mint.position.x = -(1 - cupIn) * 5;
     for (const m of this.cupGlass) (m.material as THREE.ShaderMaterial).uniforms.uOpacity.value = cupIn;
-    const flow = pourFlow(p);
+    // Tea only leaves the spout once the water inside reaches its tip.
+    const tipY = SPOUT_TIP.clone().applyMatrix4(this.pot.matrixWorld).y;
+    const flow = Math.min(pourFlow(p), smoothstep(-0.01, 0.08, pl.uLevel.value - tipY));
     this.flow = flow;
     const cl = this.cupLiquid.uniforms;
     const fill = smoothstep(0.55, 1, ph.pour) * 0.95 + ph.calm * 0.05;
@@ -1012,7 +1037,7 @@ export class TeaEngine {
     cl.uBottom.value = cupBottom;
     cl.uBrew.value = 1;
     cl.uTime.value = t;
-    cl.uWave.value = flow * 2.5;
+    cl.uWave.value = flow * 0.3;
     cl.uOpacity.value = fill > 0.01 ? 1 : 0;
 
     // Cup surface: rings spreading from where the stream lands, stirred up by the pour.
@@ -1022,15 +1047,16 @@ export class TeaEngine {
     this.cupSurface.scale.setScalar(2.2 * CUP_SCALE);
     const cs = (this.cupSurface.material as THREE.ShaderMaterial).uniforms;
     cs.uTime.value = t;
-    cs.uBoil.value = flow * 0.5;
+    cs.uBoil.value = flow * 0.18;
     cs.uSwirl.value = t * 0.3;
     cs.uBrew.value = 1;
     cs.uDepth.value = Math.max(0.05, cl.uLevel.value - cupBottom);
     cs.uVesselInv.value.copy(this.cup.matrixWorld).invert();
     {
       const rip = cs.uRipples.value as THREE.Vector4[];
-      const n = flow > 0.01 ? 20 : 0;
-      for (let k = 0; k < n; k++) rip[k].set(this.cup.position.x + 0.05, this.cup.position.z, (t % 0.12) + k * 0.12, 0.012 * flow);
+      // Gentle rings spreading from where the stream lands.
+      const n = flow > 0.01 ? 12 : 0;
+      for (let k = 0; k < n; k++) rip[k].set(this.cup.position.x + 0.05, this.cup.position.z, (t % 0.2) + k * 0.2, 0.0045 * flow);
       cs.uRippleCount.value = n;
     }
     // Foam: small bubbles drifting outward from the pour.
@@ -1048,7 +1074,8 @@ export class TeaEngine {
 
     // Pour stream from the spout into the cup: thicker at the spout, wobbling as it falls.
     this.streamUniforms.uTime.value = t;
-    this.streamUniforms.uFlow.value = flow;
+    // The first trickle races down to the cup almost at once; after that the stream only thickens.
+    this.streamUniforms.uFlow.value = Math.min(1, flow * 6);
     this.stream.visible = flow > 0.001;
     if (this.stream.visible) {
       const tip3 = SPOUT_TIP.clone().applyMatrix4(this.pot.matrixWorld);
@@ -1063,7 +1090,7 @@ export class TeaEngine {
       // Thick at the spout, thinning as it falls, with a ripple running down it.
       this.stream.geometry = taperedTube(
         curve,
-        (u) => (0.062 - 0.026 * u) * (1 + 0.14 * Math.sin(u * 26 - t * 24) + 0.06 * Math.sin(u * 61 - t * 37)),
+        (u) => (0.062 - 0.026 * u) * (0.35 + 0.65 * Math.sqrt(flow)) * (1 + 0.14 * Math.sin(u * 26 - t * 24) + 0.06 * Math.sin(u * 61 - t * 37)),
         0,
         64,
       );
