@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+html,
+body {
+  background: #050302;
+  color: #f4ead9;
+  overscroll-behavior: none;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+button:not(:disabled),
+[role="button"] {
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------------- Kinari ---------------- */
+.font-tea-display {
+  font-family: var(--font-tea-display), Georgia, serif;
+  font-weight: 400;
+}
+
+.tea-root {
+  font-family: var(--font-tea-sans), system-ui, sans-serif;
+  letter-spacing: 0.01em;
+}
+
+.tea-root h1,
+.tea-root h2 {
+  text-shadow: 0 2px 30px oklch(0 0 0 / 0.55);
+}
+
+.tea-gold {
+  color: #e7c27a;
+}
+
+.tea-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+  border-radius: 999px;
+  background: #e7c27a;
+  padding: 0.8rem 1.6rem;
+  color: #1a1108;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  box-shadow: 0 0 40px oklch(0.8 0.12 80 / 0.35);
+  transition:
+    transform 0.2s,
+    background 0.2s;
+}
+
+.tea-button:hover {
+  background: #f1d59b;
+  transform: translateY(-2px);
+}
+
+.tea-cue {
+  transform-origin: top;
+  animation: tea-cue 1.8s ease-in-out infinite;
+}
+
+@keyframes tea-cue {
+  0% { transform: scaleY(0); }
+  50% { transform: scaleY(1); }
+  100% { transform: scaleY(1); opacity: 0; }
+}
+
+.tea-fallback {
+  background:
+    radial-gradient(60% 50% at 68% 30%, oklch(0.45 0.09 65 / 0.8), transparent 70%),
+    linear-gradient(to bottom, #120a05, #050302);
+}
+
+html:has(.tea-capture) {
+  scrollbar-width: none;
+}
