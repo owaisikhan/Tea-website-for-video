@@ -185,6 +185,10 @@ export function TeaExperience() {
         if (cancelled) return;
         const engine = new TeaEngine({ canvas, lite });
         engineRef.current = engine;
+        // Photographed assets (studio light, wood, ginger): wait briefly, never block the page on them.
+        const assets = engine.loadAssets();
+        await (isCapture ? assets : Promise.race([assets, new Promise((r) => setTimeout(r, 4000))]));
+        if (cancelled) return;
         if (isCapture) {
           setCapture(true);
           window.__tea = {

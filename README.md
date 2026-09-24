@@ -19,12 +19,18 @@ Glass and tea bend the light behind them (a refraction pass over the opaque
 scene), scrolling glides with Lenis, and the camera follows a spline through
 one viewpoint per section.
 
-**Leaves:** four kinds (rolled loose tea, whole leaves, marigold petals, mint)
-with curled 3D shapes and light shining through them. Their fall is a real
-physics simulation run once on load (gravity, air drag, flutter, splash,
-buoyancy that fades as they soak, a swirling current, the glass walls) and
-played back by scroll, so scrolling up runs it in reverse. See
+**Ingredients:** rolled and whole tea leaves, marigold petals, mint, ginger
+(slices plus a scanned root), cinnamon bark, star anise, cardamom and cloves.
+They spill from the pouch as it lifts away, and their fall is a real physics
+simulation run once on load (gravity, air drag, flutter, splash, buoyancy that
+fades as they soak, a swirling current, the glass walls), played back by
+scroll so scrolling up runs it in reverse. See
 `src/components/tea/leafPhysics.ts` and `leafModels.ts`.
+
+**Water:** the surface in the pot and the cup ripples where each ingredient
+lands and where the pour hits, churns and bubbles while the tea boils, and
+stays level while the pot tilts. The tea itself is coloured by depth like real
+liquid, and the pour stream bends the light behind it.
 
 **Music:** continuous generative music made in the browser with Web Audio, no
 audio files. A warm pad glides from chord to chord as you move through the
@@ -60,3 +66,10 @@ ffmpeg):
 npm run build && npx next start -p 3100
 npm run record:reel
 ```
+
+## Credits
+
+Photographed assets are from [Poly Haven](https://polyhaven.com) (CC0, free
+for any use): the `brown_photostudio_02` HDR used for reflections, the
+`dark_wood` table texture and the `food_ginger_01` scan. They live in
+`public/assets/`. Everything else is generated in code.

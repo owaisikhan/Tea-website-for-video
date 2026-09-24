@@ -8,29 +8,13 @@
 
 import * as THREE from "three";
 
-export const LEAF_KINDS = ["rolled", "leaf", "petal", "mint"] as const;
-export type LeafKind = 0 | 1 | 2 | 3;
-
-type KindParams = {
-  airDrag: number; // linear drag in air
-  flutter: number; // side-to-side glide strength
-  spin: number; // tumble rate in air (rad/s)
-  buoy: number; // buoyancy relative to weight when dry (>1 floats)
-  soak: number; // how fast buoyancy is lost per second in water
-  waterDrag: number; // how quickly the leaf follows the water
-};
-
-const PARAMS: Record<LeafKind, KindParams> = {
-  0: { airDrag: 1.1, flutter: 0.25, spin: 8, buoy: 0.8, soak: 0, waterDrag: 3.5 }, // rolled tea: drops fast, sinks
-  1: { airDrag: 2.6, flutter: 1.5, spin: 4, buoy: 1.1, soak: 0.08, waterDrag: 4.5 }, // whole leaf: glides, floats, then sinks
-  2: { airDrag: 3.6, flutter: 2.1, spin: 5, buoy: 1.2, soak: 0.015, waterDrag: 5.5 }, // petal: drifts, mostly floats
-  3: { airDrag: 2.9, flutter: 1.8, spin: 4, buoy: 1.15, soak: 0.05, waterDrag: 5 }, // mint: floats for a while
-};
+import type { KindParams } from "./leafModels";
 
 export type Mouth = { pos: THREE.Vector3; dir: THREE.Vector3; side: THREE.Vector3 };
 
 export type SimInput = {
-  kinds: LeafKind[];
+  kinds: number[]; // index into params
+  params: KindParams[];
   sizes: number[];
   release: number[]; // seconds after the start when each leaf leaves the pouch
   duration: number; // simulated seconds
@@ -49,6 +33,7 @@ export type SimResult = {
   fps: number;
   pos: Float32Array; // frames * count * 3
   quat: Float32Array; // frames * count * 4
+  entry: Float32Array; // per leaf: [time it hit the water (-1 if never), x, z]
 };
 
 const G = 7;
@@ -74,6 +59,7 @@ export function simulateLeaves(inp: SimInput): SimResult {
   const soaked = new Float32Array(n);
   const spawned = new Uint8Array(n);
   const wet = new Uint8Array(n);
+  const entry = new Float32Array(n * 3).fill(-1);
 
   const mouth: Mouth = { pos: new THREE.Vector3(), dir: new THREE.Vector3(), side: new THREE.Vector3() };
   const up = new THREE.Vector3(0, 1, 0);
@@ -107,9 +93,9 @@ export function simulateLeaves(inp: SimInput): SimResult {
             .multiplyScalar(0.25 + rand() * 0.4)
             .add(tmp.set((rand() - 0.5) * 0.5, (rand() - 0.2) * 0.3, (rand() - 0.5) * 0.5));
           q[i].setFromEuler(new THREE.Euler(rand() * 6.28, rand() * 6.28, rand() * 6.28));
-          w[i].copy(spinAxis[i]).multiplyScalar(PARAMS[inp.kinds[i]].spin * (0.5 + rand()));
+          w[i].copy(spinAxis[i]).multiplyScalar(inp.params[inp.kinds[i]].spin * (0.5 + rand()));
         }
-        const P = PARAMS[inp.kinds[i]];
+        const P = inp.params[inp.kinds[i]];
         const x = p[i];
         const vel = v[i];
         const r = Math.hypot(x.x, x.z);
@@ -119,6 +105,7 @@ export function simulateLeaves(inp: SimInput): SimResult {
         if (inWater && !wet[i]) {
           // Splash: the surface soaks up most of the fall.
           wet[i] = 1;
+          entry.set([t, x.x, x.z], i * 3);
           vel.multiplyScalar(0.3);
           w[i].multiplyScalar(0.4);
         }
@@ -220,5 +207,5 @@ export function simulateLeaves(inp: SimInput): SimResult {
       quat.set([q[i].x, q[i].y, q[i].z, q[i].w], (f * n + i) * 4);
     }
   }
-  return { frames, fps: inp.fps, pos, quat };
+  return { frames, fps: inp.fps, pos, quat, entry };
 }

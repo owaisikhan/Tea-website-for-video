@@ -30,11 +30,15 @@ const noise = /* glsl */ `
   }
 `;
 
-// Fake warm studio: a bright window behind and to the right, a soft strip in front.
+// Reflections. When the HDR photo of a studio is loaded (uEnvOn = 1) every reflection samples
+// it; before that, a painted warm studio stands in.
 const env = /* glsl */ `
-  vec3 studio(vec3 r) {
+  uniform sampler2D uEnv;
+  uniform float uEnvOn;
+  uniform float uEnvYaw;
+  uniform float uEnvStrength;
+  vec3 paintedStudio(vec3 r) {
     float win = smoothstep(0.35, 0.95, dot(r, normalize(vec3(0.55, 0.45, -0.7))));
-    // Window mullions break the reflection into panes.
     vec3 wr = normalize(r);
     float panes = smoothstep(0.02, 0.06, abs(fract(wr.x * 5.0) - 0.5)) * smoothstep(0.02, 0.06, abs(fract(wr.y * 4.0) - 0.5));
     float strip = smoothstep(0.86, 0.99, dot(r, normalize(vec3(-0.55, 0.35, 0.75))));
@@ -44,6 +48,23 @@ const env = /* glsl */ `
     c += vec3(0.9, 0.7, 0.45) * top * 0.35;
     c += vec3(0.16, 0.09, 0.05) * (0.6 + 0.4 * r.y);
     return c;
+  }
+  vec3 studio(vec3 r) {
+    vec3 painted = paintedStudio(r);
+    if (uEnvOn < 0.5) return painted;
+    r = normalize(r);
+    float c = cos(uEnvYaw), s = sin(uEnvYaw);
+    vec3 d = vec3(c * r.x - s * r.z, r.y, s * r.x + c * r.z);
+    vec2 uv = vec2(atan(d.z, d.x) * 0.15915494 + 0.5, asin(clamp(d.y, -1.0, 1.0)) * 0.31830989 + 0.5);
+    // Warm the photo to match the room, and keep a touch of the painted window for continuity.
+    // A slightly blurred sample keeps thin ceiling lights from drawing hard lines on the glass.
+    vec3 photo = texture2D(uEnv, uv, 1.5).rgb;
+    // The photo is a bright white studio; squaring it keeps the lights and the window bright
+    // but drops the walls toward the dark room this scene is set in.
+    photo = min(photo * photo * 0.55, vec3(5.0));
+    // Ceiling lights matter less than the window and the room at eye level.
+    photo *= mix(1.0, 0.35, smoothstep(0.25, 0.8, d.y));
+    return photo * vec3(1.0, 0.8, 0.58) * uEnvStrength + painted * 0.3;
   }
 `;
 
@@ -70,6 +91,9 @@ export const glassShader = {
     ${screen}
     void main() {
       vec3 N = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+      // Hand-blown glass is never perfectly even: a faint waviness bends the reflections.
+      vec3 wv = sin(vWorld.yzx * vec3(7.1, 9.3, 8.7) + sin(vWorld.zxy * 5.3) * 1.7);
+      N = normalize(N + wv * 0.014);
       vec3 V = normalize(cameraPosition - vWorld);
       float ndv = clamp(abs(dot(N, V)), 0.0, 1.0);
       float grazing = 1.0 - ndv;
@@ -79,24 +103,26 @@ export const glassShader = {
       vec2 suv = gl_FragCoord.xy / uRes;
       vec3 Nv = normalize((viewMatrix * vec4(N, 0.0)).xyz);
       vec2 off = -Nv.xy * uRefract * (0.25 + 1.5 * grazing * grazing);
-      vec3 bg = refracted(suv, off) * vec3(0.97, 0.95, 0.9);
+      // Thick glass at a glancing angle picks up a faint green-grey tint.
+      vec3 tint = mix(vec3(0.98, 0.97, 0.94), vec3(0.8, 0.88, 0.84), smoothstep(0.5, 1.0, grazing));
+      vec3 bg = refracted(suv, off) * tint;
 
       vec3 R = reflect(-V, N);
       vec3 refl = studio(R);
-      vec3 L = normalize(vec3(0.6, 0.7, -0.4));
-      float spec = pow(max(dot(R, L), 0.0), 140.0) * 4.0 + pow(max(dot(R, normalize(vec3(-0.5, 0.4, 0.8))), 0.0), 60.0) * 0.8;
+      float spec = pow(max(dot(R, normalize(vec3(0.6, 0.7, -0.4))), 0.0), 220.0) * 3.0;
 
-      // How much of the lensed copy shows: none face-on, most at the silhouette.
-      float lens = smoothstep(0.15, 0.85, grazing);
-      vec3 col = mix(bg, refl, clamp(fres * 1.4, 0.0, 1.0));
+      float lens = smoothstep(0.2, 0.9, grazing);
+      vec3 col = mix(bg, refl, clamp(fres * 1.25, 0.0, 1.0));
       // Glass reads by its edges: a dark core line with a warm rim of light inside it.
-      float edge = smoothstep(0.82, 0.97, grazing);
-      col *= 1.0 - 0.45 * edge;
+      float edge = smoothstep(0.84, 0.98, grazing);
+      col *= 1.0 - 0.5 * edge;
       col += uGlow * smoothstep(0.55, 0.9, grazing) * (1.0 - edge);
       col += spec;
 
-      float a = max(lens * 0.9, fres * 0.9) + spec * 0.4 + 0.015;
-      if (!gl_FrontFacing) a *= 0.55;
+      // Mostly clear face-on; the reflection itself carries the opacity.
+      float reflLum = dot(refl, vec3(0.3, 0.5, 0.2));
+      float a = max(lens * 0.72, fres * 0.9) + clamp(reflLum * fres * 0.6, 0.0, 0.5) + spec * 0.4 + 0.01;
+      if (!gl_FrontFacing) a *= 0.5;
       gl_FragColor = vec4(col, clamp(a, 0.0, 1.0) * uOpacity);
     }
   `,
@@ -220,11 +246,16 @@ export const tableShader = {
     uniform vec3 uCup;
     uniform float uCupAmt;
     uniform float uPotAmt;
+    uniform sampler2D uWood;
+    uniform sampler2D uWoodNor;
+    uniform sampler2D uWoodRough;
+    uniform float uWoodOn;
     varying vec3 vWorld;
     ${noise}
     ${env}
     void main() {
       vec2 p = vWorld.xz;
+      vec2 wuv = vec2(p.x * 0.16, p.y * 0.22);
 
       // Planks run left to right; each has its own tone and grain offset.
       float plank = floor(p.y / 1.35);
@@ -242,6 +273,15 @@ export const tableShader = {
       wood = mix(wood, wood * 1.3, rings * 0.22);
       wood *= 1.0 - pores * 0.25;
       wood *= mix(0.35, 1.0, seam);
+      float rough = 0.5;
+      vec3 nts = vec3(0.0, 0.0, 1.0);
+      if (uWoodOn > 0.5) {
+        // Scanned walnut: colour, surface normal and roughness from real wood.
+        wood = texture2D(uWood, wuv).rgb * 0.32;
+        nts = texture2D(uWoodNor, wuv * 2.0).rgb * 2.0 - 1.0;
+        rough = texture2D(uWoodRough, wuv * 2.0).g;
+        seam = 1.0;
+      }
 
       // Warm light pool and an amber caustic under the glass.
       float d = length((p - uPool.xz) * vec2(0.55, 1.0));
@@ -257,9 +297,11 @@ export const tableShader = {
 
       // Varnish: a soft reflection of the room that grows toward grazing angles.
       vec3 V = normalize(cameraPosition - vWorld);
-      vec3 Nw = normalize(vec3((grain - 0.5) * 0.04, 1.0, (rings - 0.5) * 0.03));
+      vec3 Nw = uWoodOn > 0.5
+        ? normalize(vec3(nts.x * 0.6, nts.z, nts.y * 0.6))
+        : normalize(vec3((grain - 0.5) * 0.04, 1.0, (rings - 0.5) * 0.03));
       float fres = 0.03 + 0.97 * pow(1.0 - max(dot(Nw, V), 0.0), 5.0);
-      col += studio(reflect(-V, Nw)) * fres * 0.04 * seam;
+      col += studio(reflect(-V, Nw)) * fres * 0.07 * seam * (1.2 - rough);
 
       // Fade into darkness toward the back and sides.
       float fade = (smoothstep(-11.0, -3.0, vWorld.z) * 0.85 + 0.15) * (1.0 - smoothstep(6.0, 12.0, abs(vWorld.x)));
@@ -306,13 +348,17 @@ export const streamShader = {
       float ndv = clamp(abs(dot(N, V)), 0.0, 1.0);
       vec2 suv = gl_FragCoord.xy / uRes;
       vec3 Nv = normalize((viewMatrix * vec4(N, 0.0)).xyz);
-      float streak = fbm(vec2(vUv.y * 6.0, vUv.x * 14.0 - uTime * 6.0));
-      vec3 bg = refracted(suv, -Nv.xy * 0.03);
-      vec3 absorb = exp(-vec3(0.16, 0.9, 2.9) * (0.4 + 0.5 * ndv));
-      vec3 col = bg * absorb * 0.7 + vec3(0.95, 0.5, 0.1) * (0.45 + 0.4 * streak);
-      col = mix(col, studio(reflect(-V, N)), pow(1.0 - ndv, 4.0) * 0.7);
-      col += vec3(1.0, 0.8, 0.5) * pow(max(dot(reflect(-V, N), normalize(vec3(0.6, 0.7, -0.4))), 0.0), 40.0);
-      gl_FragColor = vec4(col, 0.55 + 0.4 * ndv);
+      // A falling column of tea is a lens: it flips and tints what is behind it.
+      vec3 bg = refracted(suv, -Nv.xy * 0.06);
+      float thick = 0.35 + 0.9 * ndv;
+      vec3 absorb = exp(-vec3(0.16, 0.9, 2.9) * 1.6 * thick);
+      float streak = fbm(vec2(vUv.y * 5.0, vUv.x * 18.0 - uTime * 7.0));
+      vec3 col = bg * absorb * 1.2 + vec3(1.0, 0.5, 0.09) * (0.18 + 0.3 * streak) * thick;
+      vec3 R = reflect(-V, N);
+      col = mix(col, studio(R), pow(1.0 - ndv, 3.0) * 0.8);
+      // Bright glints running down the stream.
+      col += vec3(1.0, 0.85, 0.6) * pow(max(dot(R, normalize(vec3(0.6, 0.7, -0.4))), 0.0), 30.0) * (0.6 + streak);
+      gl_FragColor = vec4(col, 0.92);
     }
   `,
 };
@@ -361,6 +407,136 @@ export const vignetteShader = {
       c.rgb *= 1.0 - dot(d, d) * 1.1;
       c.rgb += (h(vUv * 800.0 + uTime) - 0.5) * 0.02;
       gl_FragColor = c;
+    }
+  `,
+};
+
+export const MAX_RIPPLES = 48;
+export const PROFILE_SAMPLES = 32;
+
+// A horizontal water surface that ripples where ingredients land and churns as it boils.
+// It is clipped to the inside of its vessel (profile + inverse matrix), so it stays level
+// in world space even while the pot tilts to pour.
+export const surfaceShader = {
+  vertexShader: /* glsl */ `
+    uniform float uTime;
+    uniform float uBoil;
+    uniform float uSwirl;
+    uniform vec4 uRipples[${MAX_RIPPLES}]; // x, z, age (s), amplitude
+    uniform int uRippleCount;
+    varying vec3 vWorld;
+    varying vec3 vNormal;
+    ${noise}
+    float heightAt(vec2 p) {
+      float h = 0.0;
+      for (int i = 0; i < ${MAX_RIPPLES}; i++) {
+        if (i >= uRippleCount) break;
+        vec4 r = uRipples[i];
+        float d = distance(p, r.xy);
+        float front = r.z * 0.85;
+        float packet = exp(-pow((d - front) / 0.22, 2.0));
+        h += r.w * exp(-r.z * 1.6) * packet * sin((d - front) * 32.0);
+      }
+      // Boiling: churning noise that turns with the swirl.
+      float c = cos(uSwirl), s = sin(uSwirl);
+      vec2 q = vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+      // Rolling domes where bubbles reach the top, plus a finer shiver.
+      h += uBoil * 0.018 * (vnoise(q * 5.0 + uTime * 1.4) - 0.5);
+      h += uBoil * 0.004 * (vnoise(q * 11.0 - uTime * 2.1) - 0.5);
+      return h;
+    }
+    void main() {
+      vec4 w = modelMatrix * vec4(position, 1.0);
+      float e = 0.012;
+      float h = heightAt(w.xz);
+      float hx = heightAt(w.xz + vec2(e, 0.0));
+      float hz = heightAt(w.xz + vec2(0.0, e));
+      w.y += h;
+      vWorld = w.xyz;
+      vNormal = normalize(vec3(-(hx - h) / e, 1.0, -(hz - h) / e));
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform float uBrew;
+    uniform float uDepth;
+    uniform float uOpacity;
+    uniform mat4 uVesselInv;
+    uniform float uProfile[${PROFILE_SAMPLES}];
+    uniform float uProfileTop;
+    varying vec3 vWorld;
+    varying vec3 vNormal;
+    ${env}
+    ${screen}
+    float innerRadius(float y) {
+      float f = clamp(y / uProfileTop, 0.0, 1.0) * float(${PROFILE_SAMPLES - 1});
+      int i = int(floor(f));
+      int j = min(i + 1, ${PROFILE_SAMPLES - 1});
+      return mix(uProfile[i], uProfile[j], fract(f));
+    }
+    void main() {
+      vec3 local = (uVesselInv * vec4(vWorld, 1.0)).xyz;
+      float R = innerRadius(local.y);
+      float r = length(local.xz);
+      if (r > R) discard;
+
+      vec3 N = normalize(vNormal);
+      vec3 V = normalize(cameraPosition - vWorld);
+      float ndv = clamp(dot(N, V), 0.0, 1.0);
+      float fres = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+
+      // Looking down into the tea: the refracted pot and leaves, absorbed by depth.
+      vec2 suv = gl_FragCoord.xy / uRes;
+      vec3 Nv = normalize((viewMatrix * vec4(N, 0.0)).xyz);
+      vec3 bg = refracted(suv, Nv.xy * 0.03);
+      vec3 sigma = vec3(0.16, 0.9, 2.9) * (0.4 + 0.8 * uBrew);
+      vec3 absorb = exp(-uDepth * 2.2 * sigma * uBrew);
+      // Seen from above, brewed tea is a deep amber with the light caught in it.
+      vec3 col = bg * mix(vec3(0.94, 0.96, 0.95), absorb * 0.6, uBrew);
+      col += vec3(0.8, 0.34, 0.05) * uBrew * 0.1;
+
+      vec3 R3 = reflect(-V, N);
+      // The room around the pot is dark, so the surface mirrors mostly shadow and the window's glints.
+      vec3 env3 = studio(R3);
+      env3 *= 0.18 + 0.82 * smoothstep(1.2, 4.0, dot(env3, vec3(0.33)));
+      col = mix(col, env3, clamp(fres * 1.1 + 0.03, 0.0, 1.0));
+      col += pow(max(dot(R3, normalize(vec3(0.6, 0.7, -0.4))), 0.0), 300.0) * 4.0;
+      // Meniscus: the surface climbs and brightens where it meets the glass.
+      float men = smoothstep(R - 0.05, R, r);
+      col += vec3(1.0, 0.85, 0.6) * men * 0.35;
+      gl_FragColor = vec4(col, uOpacity);
+    }
+  `,
+};
+
+// Rising bubbles: clear spheres that show only their bright rims and a speck of highlight.
+export const bubbleShader = {
+  vertexShader: /* glsl */ `
+    varying vec3 vWorld;
+    varying vec3 vNormal;
+    void main() {
+      mat4 m = modelMatrix * instanceMatrix;
+      vec4 w = m * vec4(position, 1.0);
+      vWorld = w.xyz;
+      vNormal = normalize(mat3(m) * normal);
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform float uOpacity;
+    varying vec3 vWorld;
+    varying vec3 vNormal;
+    ${env}
+    void main() {
+      vec3 N = normalize(vNormal);
+      vec3 V = normalize(cameraPosition - vWorld);
+      float ndv = clamp(dot(N, V), 0.0, 1.0);
+      float rim = pow(1.0 - ndv, 2.5);
+      vec3 R = reflect(-V, N);
+      vec3 col = studio(R) * 0.6 + vec3(1.0, 0.85, 0.6) * rim;
+      float spec = pow(max(dot(R, normalize(vec3(0.6, 0.7, -0.4))), 0.0), 60.0);
+      col += spec * 2.0;
+      gl_FragColor = vec4(col, (rim * 0.85 + spec) * uOpacity);
     }
   `,
 };

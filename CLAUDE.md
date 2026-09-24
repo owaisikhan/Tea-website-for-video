@@ -20,3 +20,7 @@ Palette exceptions: warm near-black and gold (the brief was a dark, gold-lit tea
   `leafModels.ts`. The lid lifts off onto the table while leaves go in.
 - Music: `src/components/tea/teaSound.ts` (Web Audio pad + bells + pour, unlocked on first gesture, mute
   stored in localStorage). `window.__tea.soundtrack()` renders the same graph offline for the reel.
+- Assets (`public/assets/`, CC0 from Poly Haven) load in `TeaEngine.loadAssets()`; the scene works without them
+  (painted studio fallback in `shaders.ts`).
+- Water surfaces: `surfaceShader` (ripples from `sim.entry`, boiling noise, clipped by vessel profile + inverse matrix).
+  Ingredient kinds, sizes and physics live in the `ingredients` table in `leafModels.ts`.

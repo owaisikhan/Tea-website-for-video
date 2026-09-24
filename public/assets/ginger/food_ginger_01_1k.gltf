@@ -1,0 +1,156 @@
+{
+  "asset": {
+    "generator": "Khronos glTF Blender I/O v1.6.16",
+    "version": "2.0"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Scene",
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "food_ginger_01"
+    }
+  ],
+  "materials": [
+    {
+      "doubleSided": true,
+      "name": "food_ginger_01",
+      "normalTexture": {
+        "index": 0
+      },
+      "pbrMetallicRoughness": {
+        "baseColorTexture": {
+          "index": 1
+        },
+        "metallicFactor": 0,
+        "metallicRoughnessTexture": {
+          "index": 2
+        }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "ginger_root_50k_uv.001",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    },
+    {
+      "sampler": 0,
+      "source": 1
+    },
+    {
+      "sampler": 0,
+      "source": 2
+    }
+  ],
+  "images": [
+    {
+      "mimeType": "image/jpeg",
+      "name": "food_ginger_01_nor_gl",
+      "uri": "textures/food_ginger_01_nor_gl_1k.jpg"
+    },
+    {
+      "mimeType": "image/jpeg",
+      "name": "food_ginger_01_diff",
+      "uri": "textures/food_ginger_01_diff_1k.jpg"
+    },
+    {
+      "mimeType": "image/jpeg",
+      "name": "food_ginger_01_rough",
+      "uri": "textures/food_ginger_01_rough_1k.jpg"
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 4125,
+      "max": [
+        0.0952247902750969,
+        0.5751913785934448,
+        0.07218984514474869
+      ],
+      "min": [
+        -0.14471152424812317,
+        0.0006014002719894052,
+        -0.07518529891967773
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 4125,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 4125,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 21615,
+      "type": "SCALAR"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 49500,
+      "byteOffset": 0
+    },
+    {
+      "buffer": 0,
+      "byteLength": 49500,
+      "byteOffset": 49500
+    },
+    {
+      "buffer": 0,
+      "byteLength": 33000,
+      "byteOffset": 99000
+    },
+    {
+      "buffer": 0,
+      "byteLength": 43230,
+      "byteOffset": 132000
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 175232,
+      "uri": "food_ginger_01.bin"
+    }
+  ]
+}

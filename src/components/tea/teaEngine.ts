@@ -5,12 +5,18 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { HDRLoader } from "three/examples/jsm/loaders/HDRLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clamp01, phases, pourFlow, range, smoothstep, teaCenter } from "@/lib/teaTimeline";
 import { buildLeafSet, type LeafSet } from "./leafModels";
-import { simulateLeaves, type LeafKind, type Mouth, type SimResult } from "./leafPhysics";
+import { simulateLeaves, type Mouth, type SimResult } from "./leafPhysics";
 import {
   backdropShader,
+  bubbleShader,
   dustShader,
+  MAX_RIPPLES,
+  PROFILE_SAMPLES,
+  surfaceShader,
   glassShader,
   liquidShader,
   steamShader,
@@ -22,16 +28,33 @@ import {
 type Options = { canvas: HTMLCanvasElement; lite?: boolean };
 
 /** Uniforms every refracting material shares: the opaque scene and the buffer size. */
-type Shared = { uScene: { value: THREE.Texture }; uRes: { value: THREE.Vector2 } };
+type Shared = {
+  uScene: { value: THREE.Texture };
+  uRes: { value: THREE.Vector2 };
+  uEnv: { value: THREE.Texture };
+  uEnvOn: { value: number };
+  uEnvYaw: { value: number };
+  uEnvStrength: { value: number };
+};
 
 // ---------------------------------------------------------------- profiles
 // Lathe profiles as [radius, height]. The spout sits on -x, the handle on +x.
-const POT_BODY: [number, number][] = [
-  [0, 0.02], [0.5, 0.0], [0.8, 0.05], [1.05, 0.24], [1.2, 0.55], [1.25, 0.9],
-  [1.17, 1.25], [0.98, 1.54], [0.8, 1.7], [0.8, 1.78],
+// A classic round glass teapot. The shell runs up the outside, rolls over the rim of the
+// collar and back down the inside, so the glass has real thickness and a thick base.
+const POT_OUTER: [number, number][] = [
+  [0, 0], [0.55, 0], [0.66, 0.015], [0.7, 0.05], [0.8, 0.12], [1.0, 0.26], [1.17, 0.5], [1.25, 0.82],
+  [1.2, 1.14], [1.04, 1.43], [0.86, 1.6], [0.8, 1.68], [0.79, 1.78], [0.785, 1.815],
 ];
+const POT_INNER: [number, number][] = [
+  [0, 0.13], [0.5, 0.13], [0.76, 0.17], [0.96, 0.28], [1.13, 0.5], [1.21, 0.82], [1.16, 1.13],
+  [1.0, 1.41], [0.82, 1.57], [0.745, 1.7], [0.74, 1.81],
+];
+const POT_SHELL: [number, number][] = [...POT_OUTER, [0.76, 1.83], ...[...POT_INNER].reverse()];
+// Lid: knob on a short stem, a shallow dome, a flange that rests on the collar and a plug inside it.
 const POT_LID: [number, number][] = [
-  [0.84, 1.77], [0.83, 1.82], [0.7, 1.93], [0.42, 2.02], [0.14, 2.06], [0.08, 2.12], [0, 2.13],
+  [0, 2.34], [0.06, 2.33], [0.1, 2.29], [0.1, 2.24], [0.065, 2.2], [0.045, 2.16], [0.05, 2.12],
+  [0.14, 2.1], [0.4, 2.04], [0.62, 1.95], [0.78, 1.88], [0.82, 1.855], [0.835, 1.845], [0.82, 1.832],
+  [0.73, 1.832], [0.715, 1.76], [0.69, 1.745], [0.66, 1.8], [0.45, 1.93], [0.2, 2.0], [0, 2.02],
 ];
 const CUP: [number, number][] = [
   [0, 0.0], [0.55, 0.0], [0.64, 0.12], [0.7, 0.45], [0.77, 0.9], [0.8, 1.06], [0.74, 1.07],
@@ -40,11 +63,9 @@ const CUP: [number, number][] = [
 const CUP_INNER: [number, number][] = [
   [0, 0.23], [0.49, 0.28], [0.61, 0.5], [0.68, 0.92], [0.7, 1.02],
 ];
-const GLASS_WALL = 0.045;
-
-const SPOUT_TIP = new THREE.Vector3(-2.02, 1.62, 0);
+const SPOUT_TIP = new THREE.Vector3(-2.0, 1.66, 0);
 const POUR_POS = new THREE.Vector3(2.6, 2.2, 0.35);
-const CUP_POS = new THREE.Vector3(0, 0, 0.35);
+const CUP_POS = new THREE.Vector3(-0.35, 0, 0.35);
 const CUP_SCALE = 1.3;
 
 // Leaf physics runs over this slice of the scroll, as SIM_SECONDS of simulated time.
@@ -60,14 +81,15 @@ const LID_REST = new THREE.Vector3(3.1, -1.72, -0.6);
 
 function lathe(profile: [number, number][], scale = 1, segs = 144) {
   // A Catmull-Rom pass through the profile keeps the silhouette free of facets.
-  const spline = new THREE.SplineCurve(profile.map(([r, y]) => new THREE.Vector2(r * scale, y)));
-  const g = new THREE.LatheGeometry(spline.getPoints(profile.length * 14), segs);
+  const spline = new THREE.CatmullRomCurve3(profile.map(([r, y]) => new THREE.Vector3(r * scale, y, 0)), false, "centripetal");
+  const pts = spline.getPoints(profile.length * 14).map((v) => new THREE.Vector2(Math.max(0, v.x), v.y));
+  const g = new THREE.LatheGeometry(pts, segs);
   g.computeVertexNormals();
   return g;
 }
 
-/** Tube whose radius eases from r0 to r1 along the curve. */
-function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number, r1: number, segs = 128) {
+/** Tube whose radius follows `radius(t)` along the curve (or eases from r0 to r1). */
+function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number | ((t: number) => number), r1 = 0, segs = 128) {
   const radial = 32;
   const g = new THREE.TubeGeometry(curve, segs, 1, radial, false);
   const pos = g.attributes.position as THREE.BufferAttribute;
@@ -75,7 +97,7 @@ function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number, r1: number, 
   for (let i = 0; i <= segs; i++) {
     const t = i / segs;
     const c = curve.getPointAt(t);
-    const r = THREE.MathUtils.lerp(r0, r1, t * t * (3 - 2 * t));
+    const r = typeof r0 === "function" ? r0(t) : THREE.MathUtils.lerp(r0, r1, t * t * (3 - 2 * t));
     for (let j = 0; j <= radial; j++) {
       const k = i * (radial + 1) + j;
       v.fromBufferAttribute(pos, k).sub(c).multiplyScalar(r).add(c);
@@ -96,6 +118,7 @@ function rim(radius: number, tube: number, y: number) {
 
 /** Radius of a lathe profile at height y. */
 function radiusAt(profile: [number, number][], y: number) {
+  if (y <= profile[0][1]) return profile[1][0];
   for (let i = 1; i < profile.length; i++) {
     const [r0, y0] = profile[i - 1];
     const [r1, y1] = profile[i];
@@ -239,7 +262,7 @@ function rng(seed: number) {
   };
 }
 
-type LeafInstance = { kind: LeafKind; index: number; size: number; release: number };
+type LeafInstance = { kind: number; index: number; size: number; release: number };
 
 /** Pouch pose over the scroll. `t` only adds a gentle hover and shake on the live site. */
 function pouchPose(p: number, t: number, o: THREE.Object3D) {
@@ -250,7 +273,8 @@ function pouchPose(p: number, t: number, o: THREE.Object3D) {
   const away = smoothstep(0, 1, ph.pouchOut);
   o.position.set(
     THREE.MathUtils.lerp(0.4, 0.2, tip),
-    THREE.MathUtils.lerp(8.5, 3.45, drop) + away * 6 + Math.sin(t * 1.1) * 0.03 * (t > 0 ? 1 : 0),
+    // It lifts slowly as it empties, so the ingredients fall a little further each moment.
+    THREE.MathUtils.lerp(8.5, 3.45, drop) + smoothstep(0.235, 0.38, p) * 1.3 + away * 6 + Math.sin(t * 1.1) * 0.03 * (t > 0 ? 1 : 0),
     0.1,
   );
   // A small shake while leaves spill out.
@@ -294,6 +318,11 @@ export class TeaEngine {
   private leafMeshes: THREE.InstancedMesh[] = [];
   private leafList: LeafInstance[] = [];
   private sim: SimResult;
+  private potSurface: THREE.Mesh;
+  private cupSurface: THREE.Mesh;
+  private bubbles: THREE.InstancedMesh;
+  private bubbleSeeds: number[][] = [];
+  private foam: THREE.InstancedMesh;
   private mint: THREE.InstancedMesh;
   private stream: THREE.Mesh;
   private streamUniforms: Record<string, THREE.IUniform>;
@@ -329,7 +358,17 @@ export class TeaEngine {
 
     // Half-resolution copy of everything opaque, for glass and tea to refract.
     this.sceneRT = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType });
-    this.shared = { uScene: { value: this.sceneRT.texture }, uRes: { value: new THREE.Vector2(1, 1) } };
+    const blank = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+    blank.needsUpdate = true;
+    this.shared = {
+      uScene: { value: this.sceneRT.texture },
+      uRes: { value: new THREE.Vector2(1, 1) },
+      uEnv: { value: blank },
+      uEnvOn: { value: 0 },
+      uEnvYaw: { value: 0 },
+      uEnvStrength: { value: 0.9 },
+    };
+    this.disposables.push(blank);
     this.disposables.push(this.sceneRT);
 
     // Lights for the leaves, mint and pouch (glass and tea are shaded by hand).
@@ -358,6 +397,11 @@ export class TeaEngine {
         uCup: { value: CUP_POS.clone() },
         uCupAmt: { value: 0 },
         uPotAmt: { value: 1 },
+        uWood: { value: blank },
+        uWoodNor: { value: blank },
+        uWoodRough: { value: blank },
+        uWoodOn: { value: 0 },
+        ...this.shared,
       },
     });
     this.table = new THREE.Mesh(new THREE.PlaneGeometry(40, 24), tableMat);
@@ -365,91 +409,76 @@ export class TeaEngine {
     this.table.position.z = -2;
     this.scene.add(this.table);
 
-    // Teapot: outer and inner walls give the glass real thickness; rounded lips close them.
-    const innerProfile = POT_BODY.map(([r, y]): [number, number] => [Math.max(0, r - GLASS_WALL), y + (y < 0.1 ? 0.05 : 0)]);
+    // Teapot: one thick glass shell, a spout that flares out of the body and a tapered handle.
     const spoutCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(-1.02, 0.42, 0),
-      new THREE.Vector3(-1.45, 0.78, 0),
-      new THREE.Vector3(-1.78, 1.28, 0),
+      new THREE.Vector3(-0.95, 0.36, 0),
+      new THREE.Vector3(-1.3, 0.62, 0),
+      new THREE.Vector3(-1.62, 1.05, 0),
+      new THREE.Vector3(-1.86, 1.45, 0),
       SPOUT_TIP.clone(),
     ]);
-    const spoutLip = new THREE.TorusGeometry(0.075, 0.02, 16, 64);
+    const spoutLip = new THREE.TorusGeometry(0.072, 0.018, 16, 64);
     spoutLip.applyQuaternion(
       new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), spoutCurve.getTangentAt(1)),
     );
     spoutLip.translate(SPOUT_TIP.x, SPOUT_TIP.y, SPOUT_TIP.z);
     const handleCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(1.0, 1.42, 0),
-      new THREE.Vector3(1.6, 1.52, 0),
-      new THREE.Vector3(1.88, 1.1, 0),
-      new THREE.Vector3(1.64, 0.55, 0),
-      new THREE.Vector3(1.14, 0.38, 0),
-    ]);
-    const handleEnds = [handleCurve.getPointAt(0), handleCurve.getPointAt(1)].map((p) => {
-      const s = new THREE.SphereGeometry(0.095, 32, 20);
-      s.translate(p.x, p.y, p.z);
-      return s;
-    });
-    const knob = new THREE.SphereGeometry(0.11, 40, 24);
-    knob.translate(0, 2.2, 0);
+      new THREE.Vector3(0.95, 1.45, 0),
+      new THREE.Vector3(1.5, 1.6, 0),
+      new THREE.Vector3(1.9, 1.3, 0),
+      new THREE.Vector3(1.86, 0.75, 0),
+      new THREE.Vector3(1.5, 0.45, 0),
+      new THREE.Vector3(1.02, 0.42, 0),
+    ], false, "centripetal");
     const potParts: [THREE.BufferGeometry, { refract?: number; opacity?: number }][] = [
-      [lathe(POT_BODY), {}],
-      [lathe(innerProfile), { refract: 0.03, opacity: 0.6 }],
-      [rim(0.8 - GLASS_WALL / 2, GLASS_WALL / 2 + 0.008, 1.78), {}],
-      [rim(0.6, 0.035, 0.035), {}],
-      [taperedTube(spoutCurve, 0.2, 0.075), {}],
+      [lathe(POT_SHELL, 1, 160), {}],
+      [taperedTube(spoutCurve, (t) => 0.072 + 0.2 * Math.pow(1 - t, 2.4)), {}],
       [spoutLip, {}],
-      [new THREE.TubeGeometry(handleCurve, 128, 0.085, 24, false), {}],
-      ...handleEnds.map((g): [THREE.BufferGeometry, object] => [g, {}]),
+      [taperedTube(handleCurve, (t) => 0.072 + 0.05 * Math.pow(Math.abs(t - 0.5) * 2, 3)), {}],
     ];
     for (const [g, opts] of potParts) {
       this.pot.add(...glassPair(g, this.shared, opts));
       this.disposables.push(g);
     }
-    // The lid is its own group so it can be lifted off while the leaves go in.
-    for (const g of [lathe(POT_LID), rim(0.835, 0.025, 1.77), knob]) {
-      this.lid.add(...glassPair(g, this.shared));
-      this.disposables.push(g);
-    }
+    // The lid is its own group so it can be lifted off while the ingredients go in.
+    const lidGeo = lathe(POT_LID, 1, 128);
+    this.lid.add(...glassPair(lidGeo, this.shared));
+    this.disposables.push(lidGeo);
     this.pot.add(this.lid);
-    const potLiquidGeo = lathe(innerProfile.slice(0, 8), 0.99);
-    this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.2);
+    const potLiquidGeo = lathe(POT_INNER.slice(0, 9), 0.995);
+    this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.9);
     this.pot.add(...this.potLiquid.meshes);
     this.disposables.push(potLiquidGeo);
     this.scene.add(this.pot);
 
-    // Leaves: rolled loose tea, whole leaves, marigold petals and mint.
+    // Ingredients: tea (rolled and whole leaves), petals, mint, ginger, cinnamon, star anise,
+    // cardamom and cloves.
     this.leafSet = buildLeafSet();
-    const counts = lite ? [80, 26, 20, 12] : [150, 50, 36, 24];
-    const sizeRange: [number, number][] = [
-      [0.13, 0.2],
-      [0.22, 0.32],
-      [0.12, 0.18],
-      [0.2, 0.3],
-    ];
     const rand = rng(7);
     const col = new THREE.Color();
-    counts.forEach((count, kind) => {
-      const mesh = new THREE.InstancedMesh(this.leafSet.geometries[kind], this.leafSet.materials[kind], count);
+    this.leafSet.ingredients.forEach((ing, kind) => {
+      const count = lite ? ing.liteCount : ing.count;
+      const mesh = new THREE.InstancedMesh(ing.geometry, ing.material, count);
       mesh.frustumCulled = false;
       for (let i = 0; i < count; i++) {
-        const shade = 0.75 + rand() * 0.5;
-        col.setRGB(shade * (0.95 + rand() * 0.1), shade, shade * (0.9 + rand() * 0.1));
+        const shade = 0.8 + rand() * 0.4;
+        col.setRGB(shade * (0.95 + rand() * 0.1), shade, shade * (0.92 + rand() * 0.08));
         mesh.setColorAt(i, col);
-        const [a, b] = sizeRange[kind];
-        // Most leaves tumble out early, like a real pour; a few stragglers follow.
-        const release = simTime(0.232 + 0.13 * Math.pow(rand(), 1.4));
-        this.leafList.push({ kind: kind as LeafKind, index: i, size: a + rand() * (b - a), release });
+        const [a, b] = ing.size;
+        // Most of it tumbles out early, like a real pour; a few stragglers follow.
+        const release = simTime(0.232 + 0.14 * Math.pow(rand(), 1.3));
+        this.leafList.push({ kind, index: i, size: a + rand() * (b - a), release });
       }
       this.leafMeshes.push(mesh);
       this.pot.add(mesh);
     });
-    this.disposables.push(...this.leafSet.geometries, ...this.leafSet.materials, ...this.leafSet.textures);
+    this.disposables.push(...this.leafSet.disposables);
 
     // Run the physics once; playback follows the scroll.
     const pose = new THREE.Object3D();
     this.sim = simulateLeaves({
       kinds: this.leafList.map((l) => l.kind),
+      params: this.leafSet.ingredients.map((i) => i.physics),
       sizes: this.leafList.map((l) => l.size),
       release: this.leafList.map((l) => l.release),
       duration: SIM_SECONDS,
@@ -463,9 +492,9 @@ export class TeaEngine {
       },
       swirl: (t: number) => Math.sin(Math.PI * range(simProgress(t), 0.4, 0.62)),
       level: WATER_LEVEL,
-      floorY: 0.07,
-      rimY: 1.78,
-      wallRadius: (y: number) => radiusAt(POT_BODY, Math.min(1.78, Math.max(0, y))) - GLASS_WALL,
+      floorY: 0.14,
+      rimY: 1.8,
+      wallRadius: (y: number) => radiusAt(POT_INNER, Math.min(1.8, Math.max(0, y))),
     });
 
     // Tea pouch: printed foil with creases.
@@ -500,7 +529,7 @@ export class TeaEngine {
     this.disposables.push(cupLiquidGeo);
 
     // Mint leaves on the table beside the cup.
-    this.mint = new THREE.InstancedMesh(this.leafSet.geometries[3], this.leafSet.mintMaterial, 9);
+    this.mint = new THREE.InstancedMesh(this.leafSet.mintGeometry, this.leafSet.mintMaterial, 9);
     const mr = rng(3);
     for (let i = 0; i < 9; i++) {
       this.dummy.position.set(-2.1 + mr() * 0.8 + (i > 4 ? 3.4 : 0), 0.07 + mr() * 0.05, 0.9 + mr() * 0.8);
@@ -510,7 +539,62 @@ export class TeaEngine {
       this.mint.setMatrixAt(i, this.dummy.matrix);
     }
     this.scene.add(this.mint);
-    this.disposables.push(this.leafSet.mintMaterial);
+
+    // Water surfaces: rippling, boiling, clipped to the inside of the pot and the cup.
+    const makeSurface = (profile: [number, number][], top: number, order: number) => {
+      const g = new THREE.PlaneGeometry(1, 1, lite ? 64 : 110, lite ? 64 : 110);
+      g.rotateX(-Math.PI / 2);
+      const samples = Array.from({ length: PROFILE_SAMPLES }, (_, i) => radiusAt(profile, (i / (PROFILE_SAMPLES - 1)) * top));
+      const m = new THREE.ShaderMaterial({
+        ...surfaceShader,
+        uniforms: {
+          ...this.shared,
+          uTime: { value: 0 },
+          uBoil: { value: 0 },
+          uSwirl: { value: 0 },
+          uRipples: { value: Array.from({ length: MAX_RIPPLES }, () => new THREE.Vector4()) },
+          uRippleCount: { value: 0 },
+          uBrew: { value: 0 },
+          uDepth: { value: 0.8 },
+          uOpacity: { value: 1 },
+          uVesselInv: { value: new THREE.Matrix4() },
+          uProfile: { value: samples },
+          uProfileTop: { value: top },
+        },
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(g, m);
+      mesh.renderOrder = order;
+      mesh.frustumCulled = false;
+      this.scene.add(mesh);
+      this.disposables.push(g, m);
+      return mesh;
+    };
+    this.potSurface = makeSurface(POT_INNER, 1.8, 3.5);
+    this.cupSurface = makeSurface(CUP_INNER.map(([r, y]): [number, number] => [r * 0.97, y]), 1.02, 3.5);
+
+    // Bubbles rising through the tea as it heats, and a little foam where the pour lands.
+    const bubbleGeo = new THREE.IcosahedronGeometry(1, 2);
+    const bubbleMat = new THREE.ShaderMaterial({
+      ...bubbleShader,
+      uniforms: { ...this.shared, uOpacity: { value: 1 } },
+      transparent: true,
+      depthWrite: false,
+    });
+    const br = rng(29);
+    const nb = lite ? 80 : 160;
+    this.bubbles = new THREE.InstancedMesh(bubbleGeo, bubbleMat, nb);
+    this.bubbles.renderOrder = 3.2;
+    this.bubbles.frustumCulled = false;
+    for (let i = 0; i < nb; i++) this.bubbleSeeds.push([br(), br(), br(), br(), br()]);
+    this.pot.add(this.bubbles);
+    this.foam = new THREE.InstancedMesh(bubbleGeo, bubbleMat, 48);
+    this.foam.renderOrder = 3.7;
+    this.foam.frustumCulled = false;
+    this.scene.add(this.foam);
+    this.disposables.push(bubbleGeo, bubbleMat);
 
     // Pour stream (geometry rebuilt each frame while pouring).
     this.streamUniforms = { ...this.shared, uTime: { value: 0 }, uFlow: { value: 0 } };
@@ -660,6 +744,76 @@ export class TeaEngine {
     this.render();
   }
 
+  /**
+   * Swap in the photographed assets once they arrive: an HDR studio for reflections,
+   * scanned walnut for the table and a scanned ginger root. Everything works without them.
+   */
+  async loadAssets(base = "/assets") {
+    const tex = new THREE.TextureLoader();
+    const [hdr, wood, nor, rough, ginger] = await Promise.allSettled([
+      new HDRLoader().setDataType(THREE.HalfFloatType).loadAsync(`${base}/hdri/studio_1k.hdr`),
+      tex.loadAsync(`${base}/wood/dark_wood_diff_2k.jpg`),
+      tex.loadAsync(`${base}/wood/dark_wood_nor_gl_1k.jpg`),
+      tex.loadAsync(`${base}/wood/dark_wood_rough_1k.jpg`),
+      new GLTFLoader().loadAsync(`${base}/ginger/food_ginger_01_1k.gltf`),
+    ]);
+    if (hdr.status === "fulfilled") {
+      const env = hdr.value;
+      env.minFilter = THREE.LinearMipmapLinearFilter;
+      env.magFilter = THREE.LinearFilter;
+      env.generateMipmaps = true;
+      env.wrapS = THREE.RepeatWrapping;
+      env.needsUpdate = true;
+      this.shared.uEnv.value = env;
+      this.shared.uEnvOn.value = 1;
+      env.mapping = THREE.EquirectangularReflectionMapping;
+      const pm = this.pmrem.fromEquirectangular(env);
+      this.scene.environment = pm.texture;
+      this.scene.environmentIntensity = 0.4;
+      this.scene.environmentRotation.y = -this.shared.uEnvYaw.value;
+      this.disposables.push(env, pm);
+    }
+    if (wood.status === "fulfilled" && nor.status === "fulfilled" && rough.status === "fulfilled") {
+      const aniso = this.renderer.capabilities.getMaxAnisotropy();
+      wood.value.colorSpace = THREE.SRGBColorSpace;
+      for (const t of [wood.value, nor.value, rough.value]) {
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.anisotropy = aniso;
+        t.needsUpdate = true;
+        this.disposables.push(t);
+      }
+      const u = (this.table.material as THREE.ShaderMaterial).uniforms;
+      u.uWood.value = wood.value;
+      u.uWoodNor.value = nor.value;
+      u.uWoodRough.value = rough.value;
+      u.uWoodOn.value = 1;
+    }
+    if (ginger.status === "fulfilled") {
+      let found: THREE.Mesh | null = null;
+      ginger.value.scene.traverse((o) => {
+        if (!found && (o as THREE.Mesh).isMesh) found = o as THREE.Mesh;
+      });
+      const mesh = found as THREE.Mesh | null;
+      const kind = this.leafSet.ingredients.findIndex((i) => i.name === "ginger");
+      if (mesh && kind >= 0) {
+        // Centre the scan, lay its long axis along x and scale it to unit length.
+        const g = mesh.geometry.clone();
+        g.computeBoundingBox();
+        const box = g.boundingBox!;
+        const size = box.getSize(new THREE.Vector3());
+        g.translate(...box.getCenter(new THREE.Vector3()).negate().toArray());
+        if (size.y >= size.x && size.y >= size.z) g.rotateZ(Math.PI / 2);
+        else if (size.z >= size.x) g.rotateY(Math.PI / 2);
+        const k = 1 / Math.max(size.x, size.y, size.z);
+        g.scale(k, k, k);
+        const target = this.leafMeshes[kind];
+        target.geometry = g;
+        target.material = mesh.material as THREE.Material;
+        this.disposables.push(g, mesh.material as THREE.Material);
+      }
+    }
+  }
+
   resize() {
     const w = this.renderer.domElement.clientWidth || window.innerWidth;
     const h = this.renderer.domElement.clientHeight || window.innerHeight;
@@ -738,6 +892,56 @@ export class TeaEngine {
     pl.uTime.value = t;
     pl.uWave.value = Math.sin(ph.stir * Math.PI) * 1.5 + tilt;
 
+    // Pot surface: centred where the pot's axis crosses the water level, ripples where
+    // ingredients landed, churning while it boils.
+    const boil = smoothstep(0.44, 0.52, p) * (1 - smoothstep(0.64, 0.72, p));
+    const rz = this.pot.rotation.z;
+    const axisT = (pl.uLevel.value - this.pot.position.y) / Math.cos(rz);
+    this.potSurface.position.set(this.pot.position.x - Math.sin(rz) * axisT, pl.uLevel.value, this.pot.position.z);
+    this.potSurface.scale.setScalar(3.4);
+    const ps = (this.potSurface.material as THREE.ShaderMaterial).uniforms;
+    ps.uTime.value = t;
+    ps.uBoil.value = boil;
+    ps.uSwirl.value = range(p, 0.4, 0.62) * 5 + t * 0.15 * boil;
+    ps.uBrew.value = ph.brew;
+    ps.uDepth.value = Math.max(0.1, pl.uLevel.value - this.pot.position.y - 0.13);
+    ps.uVesselInv.value.copy(this.pot.matrixWorld).invert();
+    {
+      const simNow = simTime(p);
+      const e = this.sim.entry;
+      const list: [number, number, number, number][] = [];
+      for (let i = 0; i < this.leafList.length; i++) {
+        const age = simNow - e[i * 3];
+        if (e[i * 3] >= 0 && age > 0 && age < 3) list.push([e[i * 3 + 1], e[i * 3 + 2], age, Math.min(0.035, 0.01 + this.leafList[i].size * 0.05)]);
+      }
+      list.sort((a, b) => a[2] - b[2]);
+      const rip = ps.uRipples.value as THREE.Vector4[];
+      const n = Math.min(MAX_RIPPLES, list.length);
+      for (let i = 0; i < n; i++) rip[i].set(list[i][0] + this.pot.position.x, list[i][1] + this.pot.position.z, list[i][2], list[i][3]);
+      ps.uRippleCount.value = n;
+    }
+
+    // Bubbles: born on the hot glass floor, growing as they rise, bursting at the surface.
+    const bubblesOn = boil * (1 - tilt);
+    for (let i = 0; i < this.bubbleSeeds.length; i++) {
+      const s = this.bubbleSeeds[i];
+      if (s[0] > bubblesOn) {
+        this.dummy.scale.setScalar(0);
+      } else {
+        const period = 1.1 + s[1] * 1.6;
+        const phase = (t / period + s[2]) % 1;
+        const y = 0.16 + phase * (localLevel - 0.2);
+        const rad = Math.sqrt(s[3]) * radiusAt(POT_INNER, y) * 0.85;
+        const ang = s[4] * Math.PI * 2 + phase * 1.2;
+        this.dummy.position.set(Math.cos(ang) * rad + Math.sin(t * 7 + i) * 0.012, y, Math.sin(ang) * rad);
+        this.dummy.scale.setScalar((0.012 + 0.03 * phase * (0.5 + s[1])) * (1 - smoothstep(0.9, 1, phase)));
+      }
+      this.dummy.rotation.set(0, 0, 0);
+      this.dummy.updateMatrix();
+      this.bubbles.setMatrixAt(i, this.dummy.matrix);
+    }
+    this.bubbles.instanceMatrix.needsUpdate = true;
+
     // Lid: lifted off onto the table behind the pot, then put back before the close-up.
     const lidOff = smoothstep(0.165, 0.225, p) * (1 - smoothstep(0.545, 0.61, p));
     this.lid.position.copy(LID_REST).multiplyScalar(lidOff);
@@ -811,6 +1015,37 @@ export class TeaEngine {
     cl.uWave.value = flow * 2.5;
     cl.uOpacity.value = fill > 0.01 ? 1 : 0;
 
+    // Cup surface: rings spreading from where the stream lands, stirred up by the pour.
+    this.cup.updateMatrixWorld();
+    this.cupSurface.visible = fill > 0.01 && cupIn > 0.5;
+    this.cupSurface.position.set(this.cup.position.x, cl.uLevel.value, this.cup.position.z);
+    this.cupSurface.scale.setScalar(2.2 * CUP_SCALE);
+    const cs = (this.cupSurface.material as THREE.ShaderMaterial).uniforms;
+    cs.uTime.value = t;
+    cs.uBoil.value = flow * 0.5;
+    cs.uSwirl.value = t * 0.3;
+    cs.uBrew.value = 1;
+    cs.uDepth.value = Math.max(0.05, cl.uLevel.value - cupBottom);
+    cs.uVesselInv.value.copy(this.cup.matrixWorld).invert();
+    {
+      const rip = cs.uRipples.value as THREE.Vector4[];
+      const n = flow > 0.01 ? 20 : 0;
+      for (let k = 0; k < n; k++) rip[k].set(this.cup.position.x + 0.05, this.cup.position.z, (t % 0.12) + k * 0.12, 0.012 * flow);
+      cs.uRippleCount.value = n;
+    }
+    // Foam: small bubbles drifting outward from the pour.
+    for (let i = 0; i < 48; i++) {
+      const s = this.bubbleSeeds[i];
+      const phase = (t * (0.35 + s[0] * 0.3) + s[2]) % 1;
+      const rr = (0.04 + phase * 0.5) * CUP_SCALE * 0.7;
+      const ang = s[4] * Math.PI * 2 + phase * 0.8;
+      this.dummy.position.set(this.cup.position.x + 0.05 + Math.cos(ang) * rr, cl.uLevel.value + 0.004, this.cup.position.z + Math.sin(ang) * rr);
+      this.dummy.scale.setScalar(flow > 0.01 && cupIn > 0.5 ? (0.008 + 0.018 * s[1]) * (1 - phase) * (0.4 + 0.6 * flow) : 0);
+      this.dummy.updateMatrix();
+      this.foam.setMatrixAt(i, this.dummy.matrix);
+    }
+    this.foam.instanceMatrix.needsUpdate = true;
+
     // Pour stream from the spout into the cup: thicker at the spout, wobbling as it falls.
     this.streamUniforms.uTime.value = t;
     this.streamUniforms.uFlow.value = flow;
@@ -818,11 +1053,20 @@ export class TeaEngine {
     if (this.stream.visible) {
       const tip3 = SPOUT_TIP.clone().applyMatrix4(this.pot.matrixWorld);
       const end = new THREE.Vector3(this.cup.position.x + 0.05, cl.uLevel.value, this.cup.position.z);
-      const mid = tip3.clone().lerp(end, 0.5);
-      mid.x = tip3.x + (end.x - tip3.x) * 0.25 + Math.sin(t * 3.1) * 0.01;
+      // Tea leaves the spout moving along it, then gravity bends it down: a short arc.
+      const out = new THREE.Vector3(-1, -0.25, 0).applyQuaternion(this.pot.quaternion).normalize();
+      const mid = tip3.clone().addScaledVector(out, 0.35);
+      mid.y = Math.min(mid.y, tip3.y);
+      mid.x += Math.sin(t * 3.1) * 0.01;
       const curve = new THREE.QuadraticBezierCurve3(tip3, mid, end);
       this.stream.geometry.dispose();
-      this.stream.geometry = taperedTube(curve, 0.06, 0.036 + Math.sin(t * 17) * 0.003, 48);
+      // Thick at the spout, thinning as it falls, with a ripple running down it.
+      this.stream.geometry = taperedTube(
+        curve,
+        (u) => (0.062 - 0.026 * u) * (1 + 0.14 * Math.sin(u * 26 - t * 24) + 0.06 * Math.sin(u * 61 - t * 37)),
+        0,
+        64,
+      );
     }
 
     // Steam.
