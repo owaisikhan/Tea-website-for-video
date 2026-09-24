@@ -15,5 +15,8 @@ Palette exceptions: warm near-black and gold (the brief was a dark, gold-lit tea
   frame by frame into `media/kinari-reel.mp4`.
 - Refraction: `TeaEngine.render()` draws everything opaque into a half-res target first; glass,
   tea and the pour stream sample it (`uScene`). New transparent objects are skipped automatically.
-- Sound: `src/components/tea/teaSound.ts` (Web Audio, unlocked on first gesture, mute stored in
-  localStorage). The recorder synthesises the same sounds offline for the reel.
+- Leaves: `leafPhysics.ts` simulates every leaf once on load (SIM_P0..SIM_P1 of the scroll = SIM_SECONDS);
+  the engine interpolates recorded frames by scroll, so playback is reversible. Shapes and textures in
+  `leafModels.ts`. The lid lifts off onto the table while leaves go in.
+- Music: `src/components/tea/teaSound.ts` (Web Audio pad + bells + pour, unlocked on first gesture, mute
+  stored in localStorage). `window.__tea.soundtrack()` renders the same graph offline for the reel.

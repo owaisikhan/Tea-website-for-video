@@ -46,3 +46,6 @@ export const phases = (p: number) => ({
   cup: smoothstep(0.7, 0.8, p), // cup slides in
   calm: smoothstep(0.86, 0.98, p),
 });
+
+/** How strongly tea is pouring from the spout, 0..1. */
+export const pourFlow = (p: number) => smoothstep(0.5, 0.62, range(p, 0.72, 0.86));

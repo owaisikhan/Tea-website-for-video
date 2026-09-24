@@ -7,7 +7,7 @@ import { teaBrand, teaCta, teaNav, teaSections } from "@/content/tea";
 import { TEA_SCROLL_PAGES, TEA_STOPS, smoothstep, teaCopyState } from "@/lib/teaTimeline";
 import { cn } from "@/lib/utils";
 import type { TeaEngine } from "./teaEngine";
-import { TeaSound } from "./teaSound";
+import { TeaSound, renderSoundtrack, wavBase64 } from "./teaSound";
 
 // The visitor's mute choice lives in localStorage; this tiny store lets React read it
 // without a hydration mismatch (the server always assumes sound on).
@@ -39,7 +39,7 @@ const soundStore = {
 
 declare global {
   interface Window {
-    __tea?: { frame: (p: number, t: number) => void };
+    __tea?: { frame: (p: number, t: number) => void; soundtrack: (progress: number[], fps: number) => Promise<string> };
   }
 }
 
@@ -119,7 +119,7 @@ export function TeaExperience() {
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // Smooth scrolling; skipped for recording and for visitors who prefer less motion.
-    const lenis = isCapture || reducedMotion ? null : new Lenis({ duration: 1.25, smoothWheel: true, touchMultiplier: 1.2 });
+    const lenis = isCapture || reducedMotion ? null : new Lenis({ lerp: 0.075, smoothWheel: true, wheelMultiplier: 0.9, touchMultiplier: 1.2 });
 
     // Sound starts on the first tap, click or key press (browsers block it before that).
     const sound = isCapture ? null : new TeaSound();
@@ -130,7 +130,6 @@ export function TeaExperience() {
     };
     const gestures = ["pointerdown", "keydown", "touchend"] as const;
     gestures.forEach((g) => window.addEventListener(g, unlock, { passive: true }));
-    let lastSection = -1;
 
     // Scroll position -> 0..1.
     const scrollProgress = () => {
@@ -164,16 +163,7 @@ export function TeaExperience() {
       const engine = engineRef.current;
       const p = engine ? engine.getProgress() : scrollProgress();
       applyOverlay(p);
-      if (engine && sound) {
-        const { velocity, flow } = engine.getMotion();
-        sound.update(velocity, flow);
-        // A glass tap as each new section settles in.
-        const section = teaSections.findIndex((_, i) => teaCopyState(p, i).vis > 0.9);
-        if (section >= 0 && section !== lastSection) {
-          if (lastSection >= 0) sound.chime(section);
-          lastSection = section;
-        }
-      }
+      if (engine && sound) sound.update(p, engine.getMotion().velocity);
       raf = requestAnimationFrame(overlayLoop);
     };
 
@@ -202,6 +192,8 @@ export function TeaExperience() {
               engine.renderFrame(p, t);
               applyOverlay(p);
             },
+            // The reel's audio: the same music, rendered offline for a scroll path.
+            soundtrack: async (progress, fps) => wavBase64(await renderSoundtrack(progress, fps)),
           };
         } else {
           engine.setProgress(scrollProgress());

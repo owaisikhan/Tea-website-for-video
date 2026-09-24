@@ -16,15 +16,22 @@ swirls and turns gold, and the pot pours into a cup:
 7. Your moment of calm (with an Order on WhatsApp button)
 
 Glass and tea bend the light behind them (a refraction pass over the opaque
-scene), scrolling is smoothed with Lenis, and the camera glides along a spline
-through one viewpoint per section.
+scene), scrolling glides with Lenis, and the camera follows a spline through
+one viewpoint per section.
 
-**Sound:** subtle effects are generated in the browser with Web Audio, with no
-audio files: a soft whoosh that follows scroll speed, a quiet glass tap as
-each section arrives, and a trickle while the tea pours. Browsers only allow
-sound after a tap, click or key press, so it starts on the first one. The
-speaker button in the header mutes it, and the choice is remembered.
-See `src/components/tea/teaSound.ts`.
+**Leaves:** four kinds (rolled loose tea, whole leaves, marigold petals, mint)
+with curled 3D shapes and light shining through them. Their fall is a real
+physics simulation run once on load (gravity, air drag, flutter, splash,
+buoyancy that fades as they soak, a swirling current, the glass walls) and
+played back by scroll, so scrolling up runs it in reverse. See
+`src/components/tea/leafPhysics.ts` and `leafModels.ts`.
+
+**Music:** continuous generative music made in the browser with Web Audio, no
+audio files. A warm pad glides from chord to chord as you move through the
+sections, soft glass notes drift over it and grow busier while you scroll, and
+a trickle joins during the pour. It starts on the first tap, click or key press
+(browsers block sound before that) and the speaker button in the header mutes
+it; the choice is remembered. See `src/components/tea/teaSound.ts`.
 
 ## Editing
 
@@ -43,7 +50,8 @@ npm run check      # lint + typecheck + build
 
 ## The Facebook reel
 
-`media/kinari-reel.mp4` is a 1080x1920 video of the site on a laptop with the
+`media/kinari-reel.mp4` is a 1080x1920 video of the site on a laptop, scrolling
+in one continuous glide with the site's own music (rendered offline by the page), with the
 caption "Client: I don't want a basic website / Me: How's this?". The frame
 layout lives at `/reel`. To re-record it after changes (needs Playwright and
 ffmpeg):

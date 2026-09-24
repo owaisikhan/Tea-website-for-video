@@ -5,7 +5,9 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { clamp01, phases, smoothstep, teaCenter } from "@/lib/teaTimeline";
+import { clamp01, phases, pourFlow, range, smoothstep, teaCenter } from "@/lib/teaTimeline";
+import { buildLeafSet, type LeafSet } from "./leafModels";
+import { simulateLeaves, type LeafKind, type Mouth, type SimResult } from "./leafPhysics";
 import {
   backdropShader,
   dustShader,
@@ -44,6 +46,17 @@ const SPOUT_TIP = new THREE.Vector3(-2.02, 1.62, 0);
 const POUR_POS = new THREE.Vector3(2.6, 2.2, 0.35);
 const CUP_POS = new THREE.Vector3(0, 0, 0.35);
 const CUP_SCALE = 1.3;
+
+// Leaf physics runs over this slice of the scroll, as SIM_SECONDS of simulated time.
+const SIM_P0 = 0.2;
+const SIM_P1 = 0.68;
+const SIM_SECONDS = 8;
+const simTime = (p: number) => ((p - SIM_P0) / (SIM_P1 - SIM_P0)) * SIM_SECONDS;
+const simProgress = (t: number) => SIM_P0 + (t / SIM_SECONDS) * (SIM_P1 - SIM_P0);
+const WATER_LEVEL = 0.95;
+const POUCH_MOUTH = new THREE.Vector3(0, 0.76, 0);
+// Where the lid rests on the table while the leaves go in (pot space).
+const LID_REST = new THREE.Vector3(3.1, -1.72, -0.6);
 
 function lathe(profile: [number, number][], scale = 1, segs = 144) {
   // A Catmull-Rom pass through the profile keeps the silhouette free of facets.
@@ -144,66 +157,6 @@ function liquidPair(geo: THREE.BufferGeometry, shared: Shared, thick: number) {
   return { meshes: [make(THREE.BackSide, 2), make(THREE.FrontSide, 3)], uniforms };
 }
 
-/** A leaf blade curled across its width; the outline comes from the texture's alpha. */
-function leafGeometry() {
-  const g = new THREE.PlaneGeometry(1, 0.5, 10, 5);
-  const p = g.attributes.position as THREE.BufferAttribute;
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i);
-    const y = p.getY(i);
-    p.setZ(i, x * x * 0.3 + y * y * 0.9);
-  }
-  g.computeVertexNormals();
-  return g;
-}
-
-/** Greyscale leaf with a midrib and side veins; instance colour tints it. */
-function leafTexture() {
-  const c = document.createElement("canvas");
-  c.width = 256;
-  c.height = 128;
-  const x = c.getContext("2d")!;
-  const shape = new Path2D();
-  shape.moveTo(6, 64);
-  shape.bezierCurveTo(50, 2, 180, 4, 250, 64);
-  shape.bezierCurveTo(180, 124, 50, 126, 6, 64);
-  const g = x.createRadialGradient(120, 64, 8, 128, 64, 130);
-  g.addColorStop(0, "#e6e6e6");
-  g.addColorStop(1, "#8c8c8c");
-  x.fillStyle = g;
-  x.fill(shape);
-  x.save();
-  x.clip(shape);
-  // Speckle so no two patches look flat.
-  for (let i = 0; i < 900; i++) {
-    const v = 150 + Math.floor(Math.random() * 90);
-    x.fillStyle = `rgba(${v},${v},${v},0.25)`;
-    x.fillRect(Math.random() * 256, Math.random() * 128, 2, 2);
-  }
-  x.strokeStyle = "rgba(255,255,255,0.75)";
-  x.lineWidth = 3;
-  x.beginPath();
-  x.moveTo(10, 64);
-  x.quadraticCurveTo(128, 60, 246, 64);
-  x.stroke();
-  x.lineWidth = 1.4;
-  x.strokeStyle = "rgba(255,255,255,0.45)";
-  for (let i = 1; i < 9; i++) {
-    const vx = 18 + i * 25;
-    for (const s of [-1, 1]) {
-      x.beginPath();
-      x.moveTo(vx, 63);
-      x.quadraticCurveTo(vx + 14, 64 + s * 24, vx + 34, 64 + s * 48);
-      x.stroke();
-    }
-  }
-  x.restore();
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 4;
-  return t;
-}
-
 function pouchTexture() {
   const c = document.createElement("canvas");
   c.width = 512;
@@ -286,7 +239,25 @@ function rng(seed: number) {
   };
 }
 
-type Leaf = { a: number; r: number; h: number; float: boolean; delay: number; spin: number; size: number; s: number[] };
+type LeafInstance = { kind: LeafKind; index: number; size: number; release: number };
+
+/** Pouch pose over the scroll. `t` only adds a gentle hover and shake on the live site. */
+function pouchPose(p: number, t: number, o: THREE.Object3D) {
+  const ph = phases(p);
+  const drop = smoothstep(0, 0.55, ph.pouch);
+  const tip = smoothstep(0.4, 1, ph.pouch);
+  const pouring = tip * (1 - smoothstep(0.3, 0.42, p));
+  const away = smoothstep(0, 1, ph.pouchOut);
+  o.position.set(
+    THREE.MathUtils.lerp(0.4, 0.2, tip),
+    THREE.MathUtils.lerp(8.5, 3.45, drop) + away * 6 + Math.sin(t * 1.1) * 0.03 * (t > 0 ? 1 : 0),
+    0.1,
+  );
+  // A small shake while leaves spill out.
+  const shake = Math.sin(p * 900) * 0.035 * pouring;
+  o.rotation.set(0.1, -0.35 + tip * 0.2, tip * 2.55 + shake);
+  o.updateMatrixWorld();
+}
 
 export class TeaEngine {
   private renderer: THREE.WebGLRenderer;
@@ -318,8 +289,11 @@ export class TeaEngine {
   private cupLiquid: ReturnType<typeof liquidPair>;
   private cupGlass: THREE.Mesh[] = [];
   private pouch: THREE.Mesh;
-  private leaves: THREE.InstancedMesh;
-  private leafData: Leaf[] = [];
+  private lid = new THREE.Group();
+  private leafSet: LeafSet;
+  private leafMeshes: THREE.InstancedMesh[] = [];
+  private leafList: LeafInstance[] = [];
+  private sim: SimResult;
   private mint: THREE.InstancedMesh;
   private stream: THREE.Mesh;
   private streamUniforms: Record<string, THREE.IUniform>;
@@ -423,9 +397,6 @@ export class TeaEngine {
       [lathe(innerProfile), { refract: 0.03, opacity: 0.6 }],
       [rim(0.8 - GLASS_WALL / 2, GLASS_WALL / 2 + 0.008, 1.78), {}],
       [rim(0.6, 0.035, 0.035), {}],
-      [lathe(POT_LID), {}],
-      [rim(0.835, 0.025, 1.77), {}],
-      [knob, {}],
       [taperedTube(spoutCurve, 0.2, 0.075), {}],
       [spoutLip, {}],
       [new THREE.TubeGeometry(handleCurve, 128, 0.085, 24, false), {}],
@@ -435,54 +406,67 @@ export class TeaEngine {
       this.pot.add(...glassPair(g, this.shared, opts));
       this.disposables.push(g);
     }
+    // The lid is its own group so it can be lifted off while the leaves go in.
+    for (const g of [lathe(POT_LID), rim(0.835, 0.025, 1.77), knob]) {
+      this.lid.add(...glassPair(g, this.shared));
+      this.disposables.push(g);
+    }
+    this.pot.add(this.lid);
     const potLiquidGeo = lathe(innerProfile.slice(0, 8), 0.99);
     this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.2);
     this.pot.add(...this.potLiquid.meshes);
     this.disposables.push(potLiquidGeo);
     this.scene.add(this.pot);
 
-    // Leaves, petals and mint inside the pot.
-    const count = lite ? 150 : 260;
-    const leafGeo = leafGeometry();
-    const leafTex = leafTexture();
-    const leafMat = new THREE.MeshStandardMaterial({
-      map: leafTex,
-      bumpMap: leafTex,
-      bumpScale: 2,
-      alphaTest: 0.4,
-      roughness: 0.5,
-      metalness: 0.02,
-      side: THREE.DoubleSide,
-    });
-    this.leaves = new THREE.InstancedMesh(leafGeo, leafMat, count);
-    this.leaves.frustumCulled = false;
-    const rand = rng(7);
-    const palettes = [
-      [0x3b3a14, 0x4d4418, 0x2d2a10, 0x5a4a1c], // rolled leaf
-      [0xe0a21c, 0xf2b93b], // marigold petal
-      [0x4f7a24, 0x6a9a31], // mint
+    // Leaves: rolled loose tea, whole leaves, marigold petals and mint.
+    this.leafSet = buildLeafSet();
+    const counts = lite ? [80, 26, 20, 12] : [150, 50, 36, 24];
+    const sizeRange: [number, number][] = [
+      [0.13, 0.2],
+      [0.22, 0.32],
+      [0.12, 0.18],
+      [0.2, 0.3],
     ];
+    const rand = rng(7);
     const col = new THREE.Color();
-    for (let i = 0; i < count; i++) {
-      const t = rand();
-      const kind = t < 0.68 ? 0 : t < 0.86 ? 1 : 2;
-      const pal = palettes[kind];
-      col.setHex(pal[Math.floor(rand() * pal.length)]);
-      this.leaves.setColorAt(i, col);
-      const float = rand() < 0.22;
-      this.leafData.push({
-        a: rand() * Math.PI * 2,
-        r: Math.sqrt(rand()),
-        h: float ? -1 : 0.1 + rand() * 0.35,
-        float,
-        delay: rand(),
-        spin: (rand() - 0.5) * 12,
-        size: (kind === 1 ? 0.12 : 0.18) + rand() * 0.1,
-        s: [rand(), rand(), rand(), rand()],
-      });
-    }
-    this.pot.add(this.leaves);
-    this.disposables.push(leafGeo, leafTex, leafMat);
+    counts.forEach((count, kind) => {
+      const mesh = new THREE.InstancedMesh(this.leafSet.geometries[kind], this.leafSet.materials[kind], count);
+      mesh.frustumCulled = false;
+      for (let i = 0; i < count; i++) {
+        const shade = 0.75 + rand() * 0.5;
+        col.setRGB(shade * (0.95 + rand() * 0.1), shade, shade * (0.9 + rand() * 0.1));
+        mesh.setColorAt(i, col);
+        const [a, b] = sizeRange[kind];
+        // Most leaves tumble out early, like a real pour; a few stragglers follow.
+        const release = simTime(0.232 + 0.13 * Math.pow(rand(), 1.4));
+        this.leafList.push({ kind: kind as LeafKind, index: i, size: a + rand() * (b - a), release });
+      }
+      this.leafMeshes.push(mesh);
+      this.pot.add(mesh);
+    });
+    this.disposables.push(...this.leafSet.geometries, ...this.leafSet.materials, ...this.leafSet.textures);
+
+    // Run the physics once; playback follows the scroll.
+    const pose = new THREE.Object3D();
+    this.sim = simulateLeaves({
+      kinds: this.leafList.map((l) => l.kind),
+      sizes: this.leafList.map((l) => l.size),
+      release: this.leafList.map((l) => l.release),
+      duration: SIM_SECONDS,
+      fps: 30,
+      seed: 21,
+      mouth: (t: number, out: Mouth) => {
+        pouchPose(simProgress(t), 0, pose);
+        out.pos.copy(POUCH_MOUTH).applyMatrix4(pose.matrixWorld);
+        out.dir.set(0, 1, 0).transformDirection(pose.matrixWorld);
+        out.side.set(1, 0, 0).transformDirection(pose.matrixWorld);
+      },
+      swirl: (t: number) => Math.sin(Math.PI * range(simProgress(t), 0.4, 0.62)),
+      level: WATER_LEVEL,
+      floorY: 0.07,
+      rimY: 1.78,
+      wallRadius: (y: number) => radiusAt(POT_BODY, Math.min(1.78, Math.max(0, y))) - GLASS_WALL,
+    });
 
     // Tea pouch: printed foil with creases.
     const pouchGeo = pouchGeometry();
@@ -516,26 +500,17 @@ export class TeaEngine {
     this.disposables.push(cupLiquidGeo);
 
     // Mint leaves on the table beside the cup.
-    const mintMat = new THREE.MeshStandardMaterial({
-      map: leafTex,
-      bumpMap: leafTex,
-      bumpScale: 2,
-      alphaTest: 0.4,
-      color: 0x4d8a26,
-      roughness: 0.45,
-      side: THREE.DoubleSide,
-    });
-    this.mint = new THREE.InstancedMesh(leafGeo, mintMat, 9);
+    this.mint = new THREE.InstancedMesh(this.leafSet.geometries[3], this.leafSet.mintMaterial, 9);
     const mr = rng(3);
     for (let i = 0; i < 9; i++) {
-      this.dummy.position.set(-2.1 + mr() * 0.8 + (i > 4 ? 3.4 : 0), 0.05 + mr() * 0.06, 0.9 + mr() * 0.8);
-      this.dummy.rotation.set(-Math.PI / 2 + (mr() - 0.5) * 0.5, mr() * 0.4, mr() * Math.PI * 2);
-      this.dummy.scale.setScalar(0.5 + mr() * 0.3);
+      this.dummy.position.set(-2.1 + mr() * 0.8 + (i > 4 ? 3.4 : 0), 0.07 + mr() * 0.05, 0.9 + mr() * 0.8);
+      this.dummy.rotation.set(-Math.PI / 2 + (mr() - 0.5) * 0.4, mr() * 0.3, mr() * Math.PI * 2);
+      this.dummy.scale.setScalar(0.45 + mr() * 0.25);
       this.dummy.updateMatrix();
       this.mint.setMatrixAt(i, this.dummy.matrix);
     }
     this.scene.add(this.mint);
-    this.disposables.push(mintMat);
+    this.disposables.push(this.leafSet.mintMaterial);
 
     // Pour stream (geometry rebuilt each frame while pouring).
     this.streamUniforms = { ...this.shared, uTime: { value: 0 }, uFlow: { value: 0 } };
@@ -744,6 +719,7 @@ export class TeaEngine {
     const cam = this.cameraAt(p);
     this.camera.position.copy(cam.pos);
     this.camera.lookAt(cam.target);
+    this.camera.updateMatrixWorld();
 
     // Pot: lifts to the upper right and tips to pour.
     const lift = smoothstep(0, 0.4, ph.pour);
@@ -755,65 +731,66 @@ export class TeaEngine {
 
     // Pot liquid: level falls a little while pouring. The surface stays level in world space.
     const pl = this.potLiquid.uniforms;
-    const localLevel = 0.95 - tilt * 0.12 - ph.calm * 0.05;
+    const localLevel = WATER_LEVEL - tilt * 0.12 - ph.calm * 0.05;
     pl.uLevel.value = this.pot.position.y + localLevel - tilt * 0.35;
     pl.uBottom.value = this.pot.position.y;
     pl.uBrew.value = ph.brew;
     pl.uTime.value = t;
     pl.uWave.value = Math.sin(ph.stir * Math.PI) * 1.5 + tilt;
 
-    // Pouch drops in, tips over, then leaves.
-    const drop = smoothstep(0, 0.55, ph.pouch);
-    const tip = smoothstep(0.4, 1, ph.pouch);
-    const shake = Math.sin(t * 9) * 0.04 * tip * (1 - ph.pouchOut) * (ph.fall < 1 ? 1 : 0);
-    const away = smoothstep(0, 1, ph.pouchOut);
-    this.pouch.position.set(
-      THREE.MathUtils.lerp(0.4, -0.05, tip),
-      THREE.MathUtils.lerp(8.5, 3.45, drop) + away * 6 + Math.sin(t * 1.1) * 0.03,
-      0.1,
-    );
-    this.pouch.rotation.set(0.1, -0.35 + tip * 0.2, tip * 2.55 + shake);
-    this.pouch.visible = ph.pouch > 0 && ph.pouchOut < 1;
-    this.pouch.updateMatrixWorld();
+    // Lid: lifted off onto the table behind the pot, then put back before the close-up.
+    const lidOff = smoothstep(0.165, 0.225, p) * (1 - smoothstep(0.545, 0.61, p));
+    this.lid.position.copy(LID_REST).multiplyScalar(lidOff);
+    this.lid.position.y += Math.sin(Math.PI * lidOff) * 0.9;
+    this.lid.rotation.set(Math.sin(Math.PI * lidOff) * 0.35, 0, -Math.sin(Math.PI * lidOff) * 0.2);
 
-    // Leaves: fall from the pouch mouth, sink, swirl, then settle.
-    const mouth = new THREE.Vector3(0.05, 3.0, 0.1);
-    const swirl = ph.stir;
-    const dance = Math.sin(swirl * Math.PI);
-    for (let i = 0; i < this.leafData.length; i++) {
-      const L = this.leafData[i];
-      const f = clamp01((ph.fall - L.delay * 0.62) / 0.38);
-      if (f <= 0) {
+    // Pouch drops in, tips over and pours, then leaves.
+    pouchPose(p, t, this.pouch);
+    this.pouch.visible = ph.pouch > 0 && ph.pouchOut < 1;
+
+    // Leaves: play back the physics run at this point of the scroll.
+    const simT = simTime(p);
+    const sim = this.sim;
+    const fr = clamp01(simT / SIM_SECONDS) * (sim.frames - 1);
+    const f0 = Math.floor(fr);
+    const f1 = Math.min(sim.frames - 1, f0 + 1);
+    const k = fr - f0;
+    const n = this.leafList.length;
+    const qa = new THREE.Quaternion();
+    const qb = new THREE.Quaternion();
+    for (let i = 0; i < n; i++) {
+      const L = this.leafList[i];
+      const mesh = this.leafMeshes[L.kind];
+      const age = simT - L.release;
+      if (age <= 0) {
         this.dummy.scale.setScalar(0);
         this.dummy.updateMatrix();
-        this.leaves.setMatrixAt(i, this.dummy.matrix);
+        mesh.setMatrixAt(L.index, this.dummy.matrix);
         continue;
       }
-      const restY = L.float ? localLevel - 0.03 - L.s[0] * 0.05 : L.h;
-      const maxR = (radiusAt(POT_BODY, Math.max(0.1, restY)) - GLASS_WALL) * 0.86;
-      const ang = L.a + swirl * (4 + L.s[1] * 4) + t * 0.05 * (0.3 + dance);
-      const rad = maxR * L.r * (0.7 + 0.3 * Math.cos(swirl * 6 + L.s[2] * 6));
-      const y = restY + dance * (0.25 + L.s[3] * 0.6) + Math.sin(t * 1.2 + L.a * 5) * 0.02 * (1 + dance);
-      const rx = Math.cos(ang) * rad;
-      const rz = Math.sin(ang) * rad;
-      // Parabolic fall from the mouth into the pot.
-      const e = f * f;
-      const fx = THREE.MathUtils.lerp(mouth.x + (L.s[0] - 0.5) * 0.3, rx, Math.sqrt(f));
-      const fz = THREE.MathUtils.lerp(mouth.z + (L.s[1] - 0.5) * 0.3, rz, Math.sqrt(f));
-      const fy = THREE.MathUtils.lerp(mouth.y, restY, e);
-      const settle = smoothstep(0.85, 1, f);
+      const a3 = (f0 * n + i) * 3;
+      const b3 = (f1 * n + i) * 3;
       this.dummy.position.set(
-        THREE.MathUtils.lerp(fx, rx, settle),
-        THREE.MathUtils.lerp(fy, y, settle),
-        THREE.MathUtils.lerp(fz, rz, settle),
+        THREE.MathUtils.lerp(sim.pos[a3], sim.pos[b3], k),
+        THREE.MathUtils.lerp(sim.pos[a3 + 1], sim.pos[b3 + 1], k),
+        THREE.MathUtils.lerp(sim.pos[a3 + 2], sim.pos[b3 + 2], k),
       );
-      const spin = L.spin * (f + swirl * 0.6) + t * 0.2 * dance;
-      this.dummy.rotation.set(L.a + spin, spin * 0.7, L.s[2] * 6 + spin * 0.4);
-      this.dummy.scale.setScalar(L.size * (1 + ph.brew * 0.35) * smoothstep(0, 0.08, f));
+      qa.fromArray(sim.quat, (f0 * n + i) * 4);
+      qb.fromArray(sim.quat, (f1 * n + i) * 4);
+      this.dummy.quaternion.copy(qa).slerp(qb, k);
+      // Gentle drift once the leaves are in the water (time based, so it lives on after the run).
+      if (this.dummy.position.y < WATER_LEVEL) {
+        this.dummy.position.y += Math.sin(t * 1.1 + i * 1.7) * 0.006;
+        this.dummy.position.x += Math.sin(t * 0.7 + i) * 0.004;
+      }
+      // Leaves unfurl a little as they steep.
+      const unfurl = L.kind === 2 ? 1 : 1 + ph.brew * 0.25;
+      this.dummy.scale.setScalar(L.size * unfurl * THREE.MathUtils.lerp(0.6, 1, clamp01(age / 0.12)));
       this.dummy.updateMatrix();
-      this.leaves.setMatrixAt(i, this.dummy.matrix);
+      mesh.setMatrixAt(L.index, this.dummy.matrix);
     }
-    this.leaves.instanceMatrix.needsUpdate = true;
+    for (const m of this.leafMeshes) m.instanceMatrix.needsUpdate = true;
+    this.leafSet.lightView.value.set(4, 6, -5).normalize().transformDirection(this.camera.matrixWorldInverse);
 
     // Cup slides in from the left.
     const cupIn = ph.cup;
@@ -822,7 +799,7 @@ export class TeaEngine {
     this.mint.visible = cupIn > 0.001;
     this.mint.position.x = -(1 - cupIn) * 5;
     for (const m of this.cupGlass) (m.material as THREE.ShaderMaterial).uniforms.uOpacity.value = cupIn;
-    const flow = smoothstep(0.5, 0.62, ph.pour);
+    const flow = pourFlow(p);
     this.flow = flow;
     const cl = this.cupLiquid.uniforms;
     const fill = smoothstep(0.55, 1, ph.pour) * 0.95 + ph.calm * 0.05;
