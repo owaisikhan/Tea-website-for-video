@@ -1,9 +1,11 @@
 // Runs the ray-traced kettle on a canvas with vgpu (WebGPU). Drag to orbit, wheel to zoom.
 
-import { clock, effect, frameLoop, init, surface } from "vgpu";
+import { clock, effect, frameLoop, init, sampler, surface, texture } from "vgpu";
 import type { FrameLoopHandle } from "vgpu";
 import kettleShader from "./kettle.wgsl";
 import { DEFAULT_VIEW, kettleView } from "./camera";
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 export type KettleState = { brew: number; level: number; lid: boolean };
 
@@ -53,6 +55,9 @@ export function startKettle(canvas: HTMLCanvasElement, initial: KettleState, onE
       // Ray tracing every pixel is heavy: render at CSS resolution, never above 1.5x.
       const out = surface(gpu, canvas, { dpr: [1, 1.5] });
       const kettle = effect(gpu, kettleShader, { label: "kettle" });
+      // Standalone mode paints its own room, so the site-frame inputs get a blank texture.
+      const blank = texture(gpu, { kind: "2d", size: [1, 1], format: "rgba8unorm", usage: ["texture_binding", "copy_dst"] });
+      kettle.set({ scene_tex: blank, scene_samp: sampler(gpu) });
       // Compile before the first frame, so a device that cannot run it falls back to the still.
       await kettle.compile(out);
       if (disposed) return;
@@ -72,6 +77,10 @@ export function startKettle(canvas: HTMLCanvasElement, initial: KettleState, onE
             brew: state.brew,
             lid: state.lid ? 1 : 0,
             exposure: 1.1,
+            site: 0,
+            boil: 0,
+            pot_to_world: IDENTITY,
+            world_to_pot: IDENTITY,
             ...kettleView(yaw, view.pitch, view.radius),
           },
         });

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 import { resolveShader } from "@vgpu/wgsl/runtime";
-import { effect, init, target } from "vgpu/node";
+import { effect, init, sampler, target, texture } from "vgpu/node";
 import { kettleView } from "../src/components/kettle/camera.ts";
 
 const out = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : "media/kettle";
@@ -21,6 +21,10 @@ const shader = await resolveShader({ entry: fileURLToPath(new URL("../src/compon
 const gpu = await init();
 const colorTarget = target(gpu, { size: [W, H] });
 const fx = effect(gpu, shader.wgsl);
+// Standalone mode: no site frame behind the glass, the shader paints its own room.
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const STANDALONE = { site: 0, boil: 0, pot_to_world: IDENTITY, world_to_pot: IDENTITY };
+fx.set({ scene_tex: texture(gpu, { kind: "2d", size: [1, 1], format: "rgba8unorm", usage: ["texture_binding", "copy_dst"] }), scene_samp: sampler(gpu) });
 
 const shots = [
   { name: "01-water", yaw: 0.35, pitch: 0.22, radius: 7.2, level: 0.95, brew: 0, lid: 1 },
@@ -39,7 +43,7 @@ if (process.argv.includes("--video")) {
   for (let i = 0; i < frames; i++) {
     const u = i / (frames - 1);
     const ease = u * u * (3 - 2 * u);
-    fx.set({ params: { resolution: [VW, VH], time: i / FPS, level: 0.95, brew: Math.min(1, ease * 1.3), lid: 1, exposure: 1.1, ...kettleView(0.1 + ease * 2.2, 0.2 + 0.1 * Math.sin(u * Math.PI), 7.2) } });
+    fx.set({ params: { resolution: [VW, VH], time: i / FPS, level: 0.95, brew: Math.min(1, ease * 1.3), lid: 1, exposure: 1.1, ...STANDALONE, ...kettleView(0.1 + ease * 2.2, 0.2 + 0.1 * Math.sin(u * Math.PI), 7.2) } });
     fx.draw(vt);
     const png = new PNG({ width: VW, height: VH });
     png.data.set(await vt.color.read({ mipLevel: 0, region: "all" }));
@@ -53,7 +57,7 @@ if (process.argv.includes("--video")) {
 
 for (const s of shots) {
   const t0 = Date.now();
-  fx.set({ params: { resolution: [W, H], time: 1.5, level: s.level, brew: s.brew, lid: s.lid, exposure: 1.1, ...kettleView(s.yaw, s.pitch, s.radius) } });
+  fx.set({ params: { resolution: [W, H], time: 1.5, level: s.level, brew: s.brew, lid: s.lid, exposure: 1.1, ...STANDALONE, ...kettleView(s.yaw, s.pitch, s.radius) } });
   fx.draw(colorTarget);
   const pixels = await colorTarget.color.read({ mipLevel: 0, region: "all" });
   const png = new PNG({ width: W, height: H });

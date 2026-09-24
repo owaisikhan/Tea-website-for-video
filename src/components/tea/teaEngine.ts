@@ -350,6 +350,14 @@ export class TeaEngine {
   private leafMeshes: THREE.InstancedMesh[] = [];
   private leafList: LeafInstance[] = [];
   private sim: SimResult;
+  // Everything the ray-traced kettle replaces when it runs (hybrid mode).
+  private kettleMeshes: THREE.Object3D[] = [];
+  private hybrid = false;
+  private lidOff = 0;
+  private boil = 0;
+  private brew = 0;
+  /** Called right after each frame is drawn; the WebGPU kettle layer hooks in here. */
+  afterRender: (() => void) | null = null;
   private potSurface: THREE.Mesh;
   private cupSurface: THREE.Mesh;
   private bubbles: THREE.InstancedMesh;
@@ -472,7 +480,9 @@ export class TeaEngine {
       [taperedTube(handleCurve, (t) => 0.072 + 0.05 * Math.pow(Math.abs(t - 0.5) * 2, 3)), { clip: true }],
     ];
     for (const [g, opts] of potParts) {
-      this.pot.add(...glassPair(g, this.shared, opts));
+      const pair = glassPair(g, this.shared, opts);
+      this.pot.add(...pair);
+      this.kettleMeshes.push(...pair);
       this.disposables.push(g);
     }
     // The lid is its own group so it can be lifted off while the ingredients go in.
@@ -483,6 +493,7 @@ export class TeaEngine {
     const potLiquidGeo = lathe(POT_INNER.slice(0, 9), 0.995);
     this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.9);
     this.pot.add(...this.potLiquid.meshes);
+    this.kettleMeshes.push(...this.potLiquid.meshes);
     this.disposables.push(potLiquidGeo);
     // Tea inside the spout. It shares the pot's water level (the spout and pot are one vessel),
     // so it fills as the pot tips, and the stream only starts once it reaches the tip.
@@ -493,6 +504,7 @@ export class TeaEngine {
       const mesh = new THREE.Mesh(spoutTeaGeo, m);
       mesh.renderOrder = order;
       this.pot.add(mesh);
+      this.kettleMeshes.push(mesh);
       this.disposables.push(m);
     }
     this.disposables.push(spoutTeaGeo);
@@ -621,6 +633,7 @@ export class TeaEngine {
       return mesh;
     };
     this.potSurface = makeSurface(POT_INNER, 1.8, 3.5);
+    this.kettleMeshes.push(this.potSurface);
     this.cupSurface = makeSurface(CUP_INNER.map(([r, y]): [number, number] => [r * 0.97, y]), 1.02, 3.5);
 
     // Bubbles rising through the tea as it heats, and a little foam where the pour lands.
@@ -900,6 +913,38 @@ export class TeaEngine {
     for (const o of this.seeThrough) o.visible = o.userData.wasVisible;
     // 2. Full scene with glass, tea and post-processing.
     this.composer.render();
+    // 3. The WebGPU kettle, drawn over this frame (hybrid mode only).
+    this.afterRender?.();
+  }
+
+  /**
+   * Hybrid mode: the WebGL pot glass, its tea and surface are hidden and a ray-traced kettle
+   * (src/components/kettle) draws them instead. The lid stays WebGL while it is off the pot.
+   */
+  setHybrid(on: boolean) {
+    this.hybrid = on;
+    for (const o of this.kettleMeshes) o.visible = !on;
+  }
+
+  /** Everything the ray-traced kettle needs to match this frame exactly. */
+  kettleParams() {
+    const e = this.camera.matrixWorld.elements;
+    const toWorld = this.pot.matrixWorld;
+    const pl = this.potLiquid.uniforms;
+    return {
+      time: this.time,
+      level: pl.uLevel.value as number,
+      brew: this.brew,
+      boil: this.boil,
+      lid: this.lidOff < 0.02 ? 1 : 0,
+      cam_pos: [e[12], e[13], e[14]] as [number, number, number],
+      cam_right: [e[0], e[1], e[2]] as [number, number, number],
+      cam_up: [e[4], e[5], e[6]] as [number, number, number],
+      cam_fwd: [-e[8], -e[9], -e[10]] as [number, number, number],
+      tan_half_fov: Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)),
+      pot_to_world: Array.from(toWorld.elements),
+      world_to_pot: Array.from(toWorld.clone().invert().elements),
+    };
   }
 
   private cameraAt(p: number) {
@@ -958,6 +1003,8 @@ export class TeaEngine {
     // Pot surface: centred where the pot's axis crosses the water level, ripples where
     // ingredients landed, churning while it boils.
     const boil = smoothstep(0.44, 0.52, p) * (1 - smoothstep(0.64, 0.72, p));
+    this.boil = boil;
+    this.brew = ph.brew;
     const rz = this.pot.rotation.z;
     const axisT = (pl.uLevel.value - this.pot.position.y) / Math.cos(rz);
     this.potSurface.position.set(this.pot.position.x - Math.sin(rz) * axisT, pl.uLevel.value, this.pot.position.z);
@@ -1010,6 +1057,9 @@ export class TeaEngine {
     this.lid.position.copy(LID_REST).multiplyScalar(lidOff);
     this.lid.position.y += Math.sin(Math.PI * lidOff) * 0.9;
     this.lid.rotation.set(Math.sin(Math.PI * lidOff) * 0.35, 0, -Math.sin(Math.PI * lidOff) * 0.2);
+    this.lidOff = lidOff;
+    // With the ray-traced kettle, the seated lid is part of it; WebGL draws it only while it is off.
+    this.lid.visible = !this.hybrid || lidOff > 0.02;
 
     // Pouch drops in, tips over and pours, then leaves.
     pouchPose(p, t, this.pouch);

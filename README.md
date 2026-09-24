@@ -85,6 +85,29 @@ node --experimental-strip-types scripts/render-kettle.mts media/kettle
 node --experimental-strip-types scripts/render-kettle.mts media/kettle --video
 ```
 
+## The ray-traced kettle on the main site
+
+On the main page the kettle itself is the vgpu kettle, drawn on a transparent
+WebGPU canvas over the three.js one. Each frame, right after three.js renders
+(with its own pot hidden), the finished frame is copied into a WebGPU texture
+and the kettle shader runs in site mode: it traces the pot in the pot's own
+frame (so it lifts and tilts to pour), keeps the tea level in the world, and
+reads the leaves and spices inside from that frame, bent through the glass and
+tinted by the tea. Colours are passed through three.js's exact ACES tone curve
+and its inverse, so nothing shifts behind the glass. The lid is ray traced
+while it sits on the pot and drawn by three.js while it is off.
+
+Browsers without WebGPU (and any failure while starting it) keep the WebGL
+kettle. `?hybrid=off` forces the WebGL kettle.
+
+To check the composite without a WebGPU browser, render the site's frames and
+run the same shader over them with vgpu in Node:
+
+```bash
+npm run build && npx next start -p 3100
+node --experimental-strip-types scripts/verify-hybrid.mts media/kettle/site
+```
+
 ## Credits
 
 Photographed assets are from [Poly Haven](https://polyhaven.com) (CC0, free

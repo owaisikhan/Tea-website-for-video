@@ -116,4 +116,5 @@ for the rules.
 - **Lesson:** vgpu fits a single hero object that must look photoreal: SDF shapes give perfectly smooth, truly joined curves and per-pixel physical refraction that mesh shaders only approximate. Verify with `vgpu/node` headless renders (`npx vgpu doctor`, `npx vgpu install-software-renderer` on a GPU-less machine) because headless Chromium here cannot present WebGPU to a canvas at all (a raw one-triangle canvas test also fails). Compile before the first frame and fall back to a pre-rendered still. Keep the SDF cheap with bounding boxes around detailed parts; cost grows with every place the SDF is evaluated.
 - **Scope:** type: 3d-website
 - **Target in skill:** references/types/3d-website.md, section 1 (engine choice) and section 10
-- **Status:** logged (waiting for the user's verdict on the result)
+- **Update:** user: "use this kettle in the main site, but keep it on vgpu branch, do not push to main yet". Built as a transparent WebGPU layer over the three.js canvas: copyExternalImageToTexture of the WebGL frame each render, trace in the pot's frame, contents read from that frame at a depth inside the pot, three.js ACES and its inverse for exact colour, WebGL kettle as fallback. Verified by compositing site frames with vgpu/node.
+- **Status:** logged (branch only; promote once merged to main)

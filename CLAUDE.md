@@ -24,3 +24,7 @@ Palette exceptions: warm near-black and gold (the brief was a dark, gold-lit tea
   (painted studio fallback in `shaders.ts`).
 - Water surfaces: `surfaceShader` (ripples from `sim.entry`, boiling noise, clipped by vessel profile + inverse matrix).
   Ingredient kinds, sizes and physics live in the `ingredients` table in `leafModels.ts`.
+- Ray-traced kettle (branch claude/vgpu-kettle): `src/components/kettle/kettle.wgsl` (one SDF shader, `site`
+  uniform switches standalone /kettle vs the layer over the site), `hybridKettle.ts` (WebGPU layer, copies the
+  WebGL frame each render), `TeaEngine.setHybrid/kettleParams/afterRender`. Verify with `scripts/verify-hybrid.mts`
+  (headless Chromium here cannot present WebGPU; vgpu/node can render).

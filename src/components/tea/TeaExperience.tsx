@@ -41,6 +41,7 @@ declare global {
   interface Window {
     __tea?: { frame: (p: number, t: number) => void; soundtrack: (progress: number[], fps: number) => Promise<string>;
       containment: () => { worst: number; bad: number };
+      kettleParams?: () => unknown;
     };
   }
 }
@@ -89,6 +90,7 @@ function Title({ lines }: { lines: [string, string] }) {
 
 export function TeaExperience() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const kettleCanvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<TeaEngine | null>(null);
   const copyRefs = useRef<(HTMLElement | null)[]>([]);
   const barRef = useRef<HTMLDivElement>(null);
@@ -115,7 +117,12 @@ export function TeaExperience() {
     if (!canvas) return;
     let cancelled = false;
     let raf = 0;
-    const isCapture = new URLSearchParams(window.location.search).has("capture");
+    const query = new URLSearchParams(window.location.search);
+    const isCapture = query.has("capture");
+    // ?hybrid=probe (with capture): hide the WebGL pot and expose the kettle's inputs, for
+    // verifying the ray-traced kettle offline. ?hybrid=off keeps the WebGL kettle.
+    const hybridQuery = query.get("hybrid");
+    let hybridKettle: { dispose: () => void } | null = null;
     const coarse = window.matchMedia("(pointer: coarse)").matches;
     const lite = coarse && (navigator.hardwareConcurrency ?? 8) <= 4;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -193,11 +200,13 @@ export function TeaExperience() {
         if (cancelled) return;
         if (isCapture) {
           setCapture(true);
+          if (hybridQuery === "probe") engine.setHybrid(true);
           window.__tea = {
             frame: (p, t) => {
               engine.renderFrame(p, t);
               applyOverlay(p);
             },
+            kettleParams: () => engine.kettleParams(),
             // The reel's audio: the same music, rendered offline for a scroll path.
             soundtrack: async (progress, fps) => wavBase64(await renderSoundtrack(progress, fps)),
             containment: () => engine.containmentReport(),
@@ -208,6 +217,23 @@ export function TeaExperience() {
           raf = requestAnimationFrame(overlayLoop);
         }
         setReady(true);
+
+        // The ray-traced glass kettle (vgpu, WebGPU) replaces the WebGL pot where it can run.
+        // Anything that fails leaves the WebGL kettle in place.
+        const kettleCanvas = kettleCanvasRef.current;
+        if (!isCapture && hybridQuery !== "off" && kettleCanvas && "gpu" in navigator) {
+          try {
+            const { startHybridKettle } = await import("../kettle/hybridKettle");
+            const layer = await startHybridKettle(kettleCanvas);
+            if (cancelled) return layer.dispose();
+            hybridKettle = layer;
+            engine.afterRender = () => layer.render(canvas, engine.kettleParams());
+            engine.setHybrid(true);
+          } catch {
+            engine.afterRender = null;
+            engine.setHybrid(false);
+          }
+        }
       })
       .catch(() => {
         setWebglError(true);
@@ -232,6 +258,7 @@ export function TeaExperience() {
       lenis?.destroy();
       sound?.dispose();
       soundRef.current = null;
+      hybridKettle?.dispose();
       engineRef.current?.dispose();
       engineRef.current = null;
       delete window.__tea;
@@ -250,6 +277,8 @@ export function TeaExperience() {
         aria-hidden
         className={cn("fixed inset-0 h-svh w-screen", webglError && "invisible")}
       />
+      {/* The ray-traced kettle layer (transparent except for the pot). */}
+      <canvas ref={kettleCanvasRef} aria-hidden className={cn("pointer-events-none fixed inset-0 h-svh w-screen", webglError && "invisible")} />
       {webglError && <div aria-hidden className="tea-fallback fixed inset-0" />}
 
       <div className="pointer-events-none fixed inset-0">
