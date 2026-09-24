@@ -19,6 +19,9 @@ import {
 
 type Options = { canvas: HTMLCanvasElement; lite?: boolean };
 
+/** Uniforms every refracting material shares: the opaque scene and the buffer size. */
+type Shared = { uScene: { value: THREE.Texture }; uRes: { value: THREE.Vector2 } };
+
 // ---------------------------------------------------------------- profiles
 // Lathe profiles as [radius, height]. The spout sits on -x, the handle on +x.
 const POT_BODY: [number, number][] = [
@@ -35,30 +38,31 @@ const CUP: [number, number][] = [
 const CUP_INNER: [number, number][] = [
   [0, 0.23], [0.49, 0.28], [0.61, 0.5], [0.68, 0.92], [0.7, 1.02],
 ];
+const GLASS_WALL = 0.045;
 
 const SPOUT_TIP = new THREE.Vector3(-2.02, 1.62, 0);
 const POUR_POS = new THREE.Vector3(2.6, 2.2, 0.35);
 const CUP_POS = new THREE.Vector3(0, 0, 0.35);
 const CUP_SCALE = 1.3;
 
-function lathe(profile: [number, number][], scale = 1, segs = 64) {
-  // Smooth the profile so the silhouette has no facets.
+function lathe(profile: [number, number][], scale = 1, segs = 144) {
+  // A Catmull-Rom pass through the profile keeps the silhouette free of facets.
   const spline = new THREE.SplineCurve(profile.map(([r, y]) => new THREE.Vector2(r * scale, y)));
-  const g = new THREE.LatheGeometry(spline.getPoints(profile.length * 6), segs);
+  const g = new THREE.LatheGeometry(spline.getPoints(profile.length * 14), segs);
   g.computeVertexNormals();
   return g;
 }
 
-/** Tube whose radius tapers along the curve. */
-function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number, r1: number, segs = 48) {
-  const radial = 20;
+/** Tube whose radius eases from r0 to r1 along the curve. */
+function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number, r1: number, segs = 128) {
+  const radial = 32;
   const g = new THREE.TubeGeometry(curve, segs, 1, radial, false);
   const pos = g.attributes.position as THREE.BufferAttribute;
   const v = new THREE.Vector3();
   for (let i = 0; i <= segs; i++) {
     const t = i / segs;
     const c = curve.getPointAt(t);
-    const r = THREE.MathUtils.lerp(r0, r1, t);
+    const r = THREE.MathUtils.lerp(r0, r1, t * t * (3 - 2 * t));
     for (let j = 0; j <= radial; j++) {
       const k = i * (radial + 1) + j;
       v.fromBufferAttribute(pos, k).sub(c).multiplyScalar(r).add(c);
@@ -66,6 +70,14 @@ function taperedTube(curve: THREE.Curve<THREE.Vector3>, r0: number, r1: number, 
     }
   }
   g.computeVertexNormals();
+  return g;
+}
+
+/** A rounded glass lip: a torus lying flat at height y. */
+function rim(radius: number, tube: number, y: number) {
+  const g = new THREE.TorusGeometry(radius, tube, 20, 160);
+  g.rotateX(Math.PI / 2);
+  g.translate(0, y, 0);
   return g;
 }
 
@@ -81,11 +93,20 @@ function radiusAt(profile: [number, number][], y: number) {
   return profile[profile.length - 1][0];
 }
 
-function glassPair(geo: THREE.BufferGeometry, glow = new THREE.Color(0.12, 0.07, 0.025)) {
+function glassPair(
+  geo: THREE.BufferGeometry,
+  shared: Shared,
+  { glow = new THREE.Color(0.12, 0.07, 0.025), refract = 0.05, opacity = 1 } = {},
+) {
   const make = (side: THREE.Side, order: number) => {
     const m = new THREE.ShaderMaterial({
       ...glassShader,
-      uniforms: { uOpacity: { value: 1 }, uGlow: { value: glow } },
+      uniforms: {
+        ...shared,
+        uOpacity: { value: opacity },
+        uRefract: { value: refract },
+        uGlow: { value: glow },
+      },
       transparent: true,
       depthWrite: false,
       side,
@@ -97,14 +118,16 @@ function glassPair(geo: THREE.BufferGeometry, glow = new THREE.Color(0.12, 0.07,
   return [make(THREE.BackSide, 1), make(THREE.FrontSide, 4)];
 }
 
-function liquidPair(geo: THREE.BufferGeometry) {
+function liquidPair(geo: THREE.BufferGeometry, shared: Shared, thick: number) {
   const uniforms = {
+    ...shared,
     uLevel: { value: 1 },
     uBottom: { value: 0 },
     uBrew: { value: 0 },
     uTime: { value: 0 },
     uWave: { value: 0 },
     uOpacity: { value: 1 },
+    uThick: { value: thick },
   };
   const make = (side: THREE.Side, order: number) => {
     const m = new THREE.ShaderMaterial({
@@ -121,24 +144,72 @@ function liquidPair(geo: THREE.BufferGeometry) {
   return { meshes: [make(THREE.BackSide, 2), make(THREE.FrontSide, 3)], uniforms };
 }
 
+/** A leaf blade curled across its width; the outline comes from the texture's alpha. */
 function leafGeometry() {
-  const g = new THREE.PlaneGeometry(1, 0.46, 6, 3);
+  const g = new THREE.PlaneGeometry(1, 0.5, 10, 5);
   const p = g.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < p.count; i++) {
     const x = p.getX(i);
     const y = p.getY(i);
-    const w = Math.sqrt(Math.max(0, 1 - (2 * x) ** 2));
-    p.setXYZ(i, x, y * w, x * x * 0.35 + Math.abs(y) * 0.25);
+    p.setZ(i, x * x * 0.3 + y * y * 0.9);
   }
   g.computeVertexNormals();
   return g;
 }
 
-function pouchTexture() {
+/** Greyscale leaf with a midrib and side veins; instance colour tints it. */
+function leafTexture() {
   const c = document.createElement("canvas");
   c.width = 256;
-  c.height = 360;
+  c.height = 128;
   const x = c.getContext("2d")!;
+  const shape = new Path2D();
+  shape.moveTo(6, 64);
+  shape.bezierCurveTo(50, 2, 180, 4, 250, 64);
+  shape.bezierCurveTo(180, 124, 50, 126, 6, 64);
+  const g = x.createRadialGradient(120, 64, 8, 128, 64, 130);
+  g.addColorStop(0, "#e6e6e6");
+  g.addColorStop(1, "#8c8c8c");
+  x.fillStyle = g;
+  x.fill(shape);
+  x.save();
+  x.clip(shape);
+  // Speckle so no two patches look flat.
+  for (let i = 0; i < 900; i++) {
+    const v = 150 + Math.floor(Math.random() * 90);
+    x.fillStyle = `rgba(${v},${v},${v},0.25)`;
+    x.fillRect(Math.random() * 256, Math.random() * 128, 2, 2);
+  }
+  x.strokeStyle = "rgba(255,255,255,0.75)";
+  x.lineWidth = 3;
+  x.beginPath();
+  x.moveTo(10, 64);
+  x.quadraticCurveTo(128, 60, 246, 64);
+  x.stroke();
+  x.lineWidth = 1.4;
+  x.strokeStyle = "rgba(255,255,255,0.45)";
+  for (let i = 1; i < 9; i++) {
+    const vx = 18 + i * 25;
+    for (const s of [-1, 1]) {
+      x.beginPath();
+      x.moveTo(vx, 63);
+      x.quadraticCurveTo(vx + 14, 64 + s * 24, vx + 34, 64 + s * 48);
+      x.stroke();
+    }
+  }
+  x.restore();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+
+function pouchTexture() {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 720;
+  const x = c.getContext("2d")!;
+  x.scale(2, 2);
   const g = x.createLinearGradient(0, 0, 256, 360);
   g.addColorStop(0, "#e9c36a");
   g.addColorStop(0.45, "#a8741f");
@@ -149,7 +220,7 @@ function pouchTexture() {
   x.fillStyle = "#1a1109";
   x.fillRect(0, 120, 256, 150);
   x.strokeStyle = "#d9b25a";
-  x.lineWidth = 2;
+  x.lineWidth = 1.5;
   x.strokeRect(14, 132, 228, 126);
   x.fillStyle = "#e8c577";
   x.textAlign = "center";
@@ -161,15 +232,41 @@ function pouchTexture() {
   x.fillText("LOOSE LEAF  100G", 128, 248);
   // Crimped top seal.
   x.fillStyle = "rgba(60,35,5,0.35)";
-  for (let i = 0; i < 256; i += 8) x.fillRect(i, 8, 3, 28);
+  for (let i = 0; i < 256; i += 6) x.fillRect(i, 8, 2.5, 26);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 4;
+  t.anisotropy = 8;
+  return t;
+}
+
+/** Crumpled foil: random creases, blurred, used as a bump map. */
+function foilBump() {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 360;
+  const x = c.getContext("2d")!;
+  x.fillStyle = "#808080";
+  x.fillRect(0, 0, 256, 360);
+  let seed = 5;
+  const r = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+  x.filter = "blur(1.5px)";
+  for (let i = 0; i < 70; i++) {
+    const v = r() > 0.5 ? 200 : 50;
+    x.strokeStyle = `rgba(${v},${v},${v},${0.15 + r() * 0.25})`;
+    x.lineWidth = 1 + r() * 3;
+    x.beginPath();
+    const sx = r() * 256;
+    const sy = r() * 360;
+    x.moveTo(sx, sy);
+    x.lineTo(sx + (r() - 0.5) * 160, sy + (r() - 0.5) * 160);
+    x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
   return t;
 }
 
 function pouchGeometry() {
-  const g = new THREE.BoxGeometry(1.1, 1.55, 0.36, 12, 16, 4);
+  const g = new THREE.BoxGeometry(1.1, 1.55, 0.36, 24, 32, 6);
   const p = g.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < p.count; i++) {
     const x = p.getX(i) / 0.55;
@@ -191,8 +288,6 @@ function rng(seed: number) {
 
 type Leaf = { a: number; r: number; h: number; float: boolean; delay: number; spin: number; size: number; s: number[] };
 
-type CamKey = { pos: THREE.Vector3; target: THREE.Vector3 };
-
 export class TeaEngine {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -201,12 +296,17 @@ export class TeaEngine {
   private bloom: UnrealBloomPass;
   private vignette: ShaderPass;
   private pmrem: THREE.PMREMGenerator;
+  private sceneRT: THREE.WebGLRenderTarget;
+  private shared: Shared;
+  private seeThrough: THREE.Object3D[] = [];
   private raf = 0;
   private running = false;
   private last = 0;
   private time = 0;
   private progress = 0;
   private target = 0;
+  private velocity = 0;
+  private flow = 0;
   private pointer = new THREE.Vector2();
   private pointerSmooth = new THREE.Vector2();
   private narrow = false;
@@ -216,21 +316,21 @@ export class TeaEngine {
   private potLiquid: ReturnType<typeof liquidPair>;
   private cup = new THREE.Group();
   private cupLiquid: ReturnType<typeof liquidPair>;
-  private cupGlass: THREE.Mesh[];
+  private cupGlass: THREE.Mesh[] = [];
   private pouch: THREE.Mesh;
   private leaves: THREE.InstancedMesh;
   private leafData: Leaf[] = [];
   private mint: THREE.InstancedMesh;
   private stream: THREE.Mesh;
-  private streamUniforms = { uTime: { value: 0 }, uFlow: { value: 0 } };
+  private streamUniforms: Record<string, THREE.IUniform>;
   private steam: THREE.Mesh[] = [];
   private cupSteam: THREE.Mesh[] = [];
   private dust: THREE.Points;
   private backdrop: THREE.Mesh;
   private table: THREE.Mesh;
-  private camKeys: CamKey[];
+  private camPath: THREE.CatmullRomCurve3;
+  private camAim: THREE.CatmullRomCurve3;
   private dummy = new THREE.Object3D();
-  private tmp = new THREE.Vector3();
 
   constructor({ canvas, lite = false }: Options) {
     this.renderer = new THREE.WebGLRenderer({
@@ -252,6 +352,11 @@ export class TeaEngine {
     this.scene.environmentIntensity = 0.55;
     this.scene.background = new THREE.Color(0x050302);
     this.disposables.push(envTex);
+
+    // Half-resolution copy of everything opaque, for glass and tea to refract.
+    this.sceneRT = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType });
+    this.shared = { uScene: { value: this.sceneRT.texture }, uRes: { value: new THREE.Vector2(1, 1) } };
+    this.disposables.push(this.sceneRT);
 
     // Lights for the leaves, mint and pouch (glass and tea are shaded by hand).
     this.scene.add(new THREE.AmbientLight(0xffd7a0, 0.35));
@@ -278,6 +383,7 @@ export class TeaEngine {
         uPool: { value: new THREE.Vector3() },
         uCup: { value: CUP_POS.clone() },
         uCupAmt: { value: 0 },
+        uPotAmt: { value: 1 },
       },
     });
     this.table = new THREE.Mesh(new THREE.PlaneGeometry(40, 24), tableMat);
@@ -285,18 +391,19 @@ export class TeaEngine {
     this.table.position.z = -2;
     this.scene.add(this.table);
 
-    // Teapot.
-    const bodyGeo = lathe(POT_BODY);
-    const lidGeo = lathe(POT_LID);
-    const knob = new THREE.SphereGeometry(0.11, 24, 16);
-    knob.translate(0, 2.2, 0);
+    // Teapot: outer and inner walls give the glass real thickness; rounded lips close them.
+    const innerProfile = POT_BODY.map(([r, y]): [number, number] => [Math.max(0, r - GLASS_WALL), y + (y < 0.1 ? 0.05 : 0)]);
     const spoutCurve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(-1.02, 0.42, 0),
       new THREE.Vector3(-1.45, 0.78, 0),
       new THREE.Vector3(-1.78, 1.28, 0),
       SPOUT_TIP.clone(),
     ]);
-    const spoutGeo = taperedTube(spoutCurve, 0.2, 0.075);
+    const spoutLip = new THREE.TorusGeometry(0.075, 0.02, 16, 64);
+    spoutLip.applyQuaternion(
+      new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), spoutCurve.getTangentAt(1)),
+    );
+    spoutLip.translate(SPOUT_TIP.x, SPOUT_TIP.y, SPOUT_TIP.z);
     const handleCurve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(1.0, 1.42, 0),
       new THREE.Vector3(1.6, 1.52, 0),
@@ -304,13 +411,32 @@ export class TeaEngine {
       new THREE.Vector3(1.64, 0.55, 0),
       new THREE.Vector3(1.14, 0.38, 0),
     ]);
-    const handleGeo = new THREE.TubeGeometry(handleCurve, 48, 0.085, 16, false);
-    for (const g of [bodyGeo, lidGeo, knob, spoutGeo, handleGeo]) {
-      this.pot.add(...glassPair(g));
+    const handleEnds = [handleCurve.getPointAt(0), handleCurve.getPointAt(1)].map((p) => {
+      const s = new THREE.SphereGeometry(0.095, 32, 20);
+      s.translate(p.x, p.y, p.z);
+      return s;
+    });
+    const knob = new THREE.SphereGeometry(0.11, 40, 24);
+    knob.translate(0, 2.2, 0);
+    const potParts: [THREE.BufferGeometry, { refract?: number; opacity?: number }][] = [
+      [lathe(POT_BODY), {}],
+      [lathe(innerProfile), { refract: 0.03, opacity: 0.6 }],
+      [rim(0.8 - GLASS_WALL / 2, GLASS_WALL / 2 + 0.008, 1.78), {}],
+      [rim(0.6, 0.035, 0.035), {}],
+      [lathe(POT_LID), {}],
+      [rim(0.835, 0.025, 1.77), {}],
+      [knob, {}],
+      [taperedTube(spoutCurve, 0.2, 0.075), {}],
+      [spoutLip, {}],
+      [new THREE.TubeGeometry(handleCurve, 128, 0.085, 24, false), {}],
+      ...handleEnds.map((g): [THREE.BufferGeometry, object] => [g, {}]),
+    ];
+    for (const [g, opts] of potParts) {
+      this.pot.add(...glassPair(g, this.shared, opts));
       this.disposables.push(g);
     }
-    const potLiquidGeo = lathe(POT_BODY.slice(0, 8), 0.94);
-    this.potLiquid = liquidPair(potLiquidGeo);
+    const potLiquidGeo = lathe(innerProfile.slice(0, 8), 0.99);
+    this.potLiquid = liquidPair(potLiquidGeo, this.shared, 1.2);
     this.pot.add(...this.potLiquid.meshes);
     this.disposables.push(potLiquidGeo);
     this.scene.add(this.pot);
@@ -318,7 +444,16 @@ export class TeaEngine {
     // Leaves, petals and mint inside the pot.
     const count = lite ? 150 : 260;
     const leafGeo = leafGeometry();
-    const leafMat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide });
+    const leafTex = leafTexture();
+    const leafMat = new THREE.MeshStandardMaterial({
+      map: leafTex,
+      bumpMap: leafTex,
+      bumpScale: 2,
+      alphaTest: 0.4,
+      roughness: 0.5,
+      metalness: 0.02,
+      side: THREE.DoubleSide,
+    });
     this.leaves = new THREE.InstancedMesh(leafGeo, leafMat, count);
     this.leaves.frustumCulled = false;
     const rand = rng(7);
@@ -342,41 +477,60 @@ export class TeaEngine {
         float,
         delay: rand(),
         spin: (rand() - 0.5) * 12,
-        size: (kind === 1 ? 0.1 : 0.15) + rand() * 0.09,
+        size: (kind === 1 ? 0.12 : 0.18) + rand() * 0.1,
         s: [rand(), rand(), rand(), rand()],
       });
     }
     this.pot.add(this.leaves);
-    this.disposables.push(leafGeo, leafMat);
+    this.disposables.push(leafGeo, leafTex, leafMat);
 
-    // Tea pouch.
+    // Tea pouch: printed foil with creases.
     const pouchGeo = pouchGeometry();
     const tex = pouchTexture();
-    const pouchMat = new THREE.MeshStandardMaterial({ map: tex, metalness: 0.75, roughness: 0.32 });
+    const bump = foilBump();
+    const pouchMat = new THREE.MeshStandardMaterial({
+      map: tex,
+      bumpMap: bump,
+      bumpScale: 4,
+      metalness: 0.85,
+      roughness: 0.28,
+    });
     this.pouch = new THREE.Mesh(pouchGeo, pouchMat);
     this.scene.add(this.pouch);
-    this.disposables.push(pouchGeo, tex, pouchMat);
+    this.disposables.push(pouchGeo, tex, bump, pouchMat);
 
-    // Double-walled cup.
-    const cupGeo = lathe(CUP);
-    this.cupGlass = glassPair(cupGeo, new THREE.Color(0.16, 0.09, 0.03));
-    this.cup.add(...this.cupGlass);
+    // Double-walled cup with a rounded lip.
+    const cupGlow = new THREE.Color(0.16, 0.09, 0.03);
+    for (const g of [lathe(CUP), rim(0.77, 0.032, 1.065)]) {
+      const pair = glassPair(g, this.shared, { glow: cupGlow });
+      this.cupGlass.push(...pair);
+      this.cup.add(...pair);
+      this.disposables.push(g);
+    }
     const cupLiquidGeo = lathe(CUP_INNER, 0.97);
-    this.cupLiquid = liquidPair(cupLiquidGeo);
+    this.cupLiquid = liquidPair(cupLiquidGeo, this.shared, 0.9);
     this.cup.add(...this.cupLiquid.meshes);
     this.cup.position.copy(CUP_POS);
     this.cup.scale.setScalar(CUP_SCALE);
     this.scene.add(this.cup);
-    this.disposables.push(cupGeo, cupLiquidGeo);
+    this.disposables.push(cupLiquidGeo);
 
-    // Mint sprigs on the table beside the cup.
-    const mintMat = new THREE.MeshStandardMaterial({ color: 0x3f6d1f, roughness: 0.5, side: THREE.DoubleSide });
-    this.mint = new THREE.InstancedMesh(leafGeo, mintMat, 7);
+    // Mint leaves on the table beside the cup.
+    const mintMat = new THREE.MeshStandardMaterial({
+      map: leafTex,
+      bumpMap: leafTex,
+      bumpScale: 2,
+      alphaTest: 0.4,
+      color: 0x4d8a26,
+      roughness: 0.45,
+      side: THREE.DoubleSide,
+    });
+    this.mint = new THREE.InstancedMesh(leafGeo, mintMat, 9);
     const mr = rng(3);
-    for (let i = 0; i < 7; i++) {
-      this.dummy.position.set(-2.1 + mr() * 0.7 + (i > 3 ? 3.4 : 0), 0.04 + mr() * 0.08, 0.9 + mr() * 0.8);
-      this.dummy.rotation.set(-Math.PI / 2 + (mr() - 0.5) * 0.6, mr() * 0.4, mr() * Math.PI * 2);
-      this.dummy.scale.setScalar(0.45 + mr() * 0.25);
+    for (let i = 0; i < 9; i++) {
+      this.dummy.position.set(-2.1 + mr() * 0.8 + (i > 4 ? 3.4 : 0), 0.05 + mr() * 0.06, 0.9 + mr() * 0.8);
+      this.dummy.rotation.set(-Math.PI / 2 + (mr() - 0.5) * 0.5, mr() * 0.4, mr() * Math.PI * 2);
+      this.dummy.scale.setScalar(0.5 + mr() * 0.3);
       this.dummy.updateMatrix();
       this.mint.setMatrixAt(i, this.dummy.matrix);
     }
@@ -384,6 +538,7 @@ export class TeaEngine {
     this.disposables.push(mintMat);
 
     // Pour stream (geometry rebuilt each frame while pouring).
+    this.streamUniforms = { ...this.shared, uTime: { value: 0 }, uFlow: { value: 0 } };
     const streamMat = new THREE.ShaderMaterial({
       ...streamShader,
       uniforms: this.streamUniforms,
@@ -441,25 +596,30 @@ export class TeaEngine {
     this.scene.add(this.dust);
     this.disposables.push(dustGeo, dustMat);
 
-    // Camera keyframes, one per section (see content/tea.ts for which side the copy sits).
-    const k = (px: number, py: number, pz: number, tx: number, ty: number, tz: number): CamKey => ({
-      pos: new THREE.Vector3(px, py, pz),
-      target: new THREE.Vector3(tx, ty, tz),
-    });
-    this.camKeys = [
-      k(0, 2.9, 10.2, 0, 2.45, 0), // hero: pot under the headline
-      k(-0.9, 3.3, 10.2, 1.2, 2.45, 0), // unwrap: pouch above, copy right
-      k(1.2, 2.9, 8.2, -1.2, 1.9, 0), // glass: copy left
-      k(-0.6, 2.4, 6.6, 1.0, 1.15, 0), // stir: copy right
-      k(0.6, 1.5, 5.6, -1.1, 1.0, 0), // gold: close, copy left
-      k(-1.2, 2.7, 10.6, 2.3, 1.85, 0), // pour: copy right
-      k(-2.2, 2.6, 9.8, -1.3, 1.95, 0.3), // calm: scene right, copy left: cup under the headline
+    // Camera path: one key per section (see content/tea.ts for which side the copy sits),
+    // joined by a spline so the camera glides through each key instead of stopping.
+    const keys: [number, number, number, number, number, number][] = [
+      [0, 2.9, 10.2, 0, 2.45, 0], // hero: pot under the headline
+      [-0.9, 3.3, 10.2, 1.2, 2.45, 0], // unwrap: pouch above, copy right
+      [1.2, 2.9, 8.2, -1.2, 1.9, 0], // glass: copy left
+      [-0.6, 2.4, 6.6, 1.0, 1.15, 0], // stir: copy right
+      [0.6, 1.5, 5.6, -1.1, 1.0, 0], // gold: close, copy left
+      [-1.2, 2.7, 10.6, 2.3, 1.85, 0], // pour: copy right
+      [-2.2, 2.6, 9.8, -1.3, 1.95, 0.3], // calm: scene right, copy left
     ];
+    this.camPath = new THREE.CatmullRomCurve3(keys.map((k) => new THREE.Vector3(k[0], k[1], k[2])), false, "centripetal");
+    this.camAim = new THREE.CatmullRomCurve3(keys.map((k) => new THREE.Vector3(k[3], k[4], k[5])), false, "centripetal");
+
+    // Everything that refracts is left out of the opaque pre-pass.
+    this.scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m && !Array.isArray(m) && m.transparent) this.seeThrough.push(o);
+    });
 
     // Post-processing.
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.35, 0.55, 0.86);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.32, 0.55, 0.86);
     this.composer.addPass(this.bloom);
     this.vignette = new ShaderPass(vignetteShader);
     this.composer.addPass(this.vignette);
@@ -479,10 +639,15 @@ export class TeaEngine {
       const dt = Math.min((now - this.last) / 1000, 0.05);
       this.last = now;
       this.time += dt;
-      this.progress += (this.target - this.progress) * (1 - Math.exp(-dt * 6));
+      // Lenis already smooths the scroll; this only irons out wheel steps and touch jitter.
+      const prev = this.progress;
+      this.progress += (this.target - this.progress) * (1 - Math.exp(-dt * 10));
+      if (Math.abs(this.target - this.progress) < 1e-5) this.progress = this.target;
+      const v = dt > 0 ? (this.progress - prev) / dt : 0;
+      this.velocity += (v - this.velocity) * (1 - Math.exp(-dt * 8));
       this.pointerSmooth.lerp(this.pointer, 1 - Math.exp(-dt * 3));
       this.update(this.progress);
-      this.composer.render();
+      this.render();
       this.raf = requestAnimationFrame(loop);
     };
     this.raf = requestAnimationFrame(loop);
@@ -503,6 +668,11 @@ export class TeaEngine {
     return this.progress;
   }
 
+  /** What the sound layer listens to: scroll speed (progress per second) and pour flow. */
+  getMotion() {
+    return { velocity: this.velocity, flow: this.flow };
+  }
+
   setPointer(x: number, y: number) {
     this.pointer.set(x, y);
   }
@@ -512,7 +682,7 @@ export class TeaEngine {
     this.progress = this.target = clamp01(p);
     this.time = t;
     this.update(this.progress);
-    this.composer.render();
+    this.render();
   }
 
   resize() {
@@ -522,22 +692,40 @@ export class TeaEngine {
     this.renderer.setSize(w, h, false);
     this.composer.setSize(w, h);
     this.bloom.resolution.set(w / 2, h / 2);
+    const buf = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.shared.uRes.value.copy(buf);
+    this.sceneRT.setSize(Math.ceil(buf.x / 2), Math.ceil(buf.y / 2));
     this.camera.aspect = w / h;
     this.camera.fov = this.narrow ? 48 : 32;
     this.camera.updateProjectionMatrix();
   }
 
+  private render() {
+    // 1. Opaque scene only, into the refraction buffer.
+    for (const o of this.seeThrough) o.userData.wasVisible = o.visible;
+    for (const o of this.seeThrough) o.visible = false;
+    this.renderer.setRenderTarget(this.sceneRT);
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.setRenderTarget(null);
+    for (const o of this.seeThrough) o.visible = o.userData.wasVisible;
+    // 2. Full scene with glass, tea and post-processing.
+    this.composer.render();
+  }
+
   private cameraAt(p: number) {
-    const centers = this.camKeys.map((_, i) => teaCenter(i));
+    const n = this.camPath.points.length;
     let i = 0;
-    while (i < centers.length - 2 && p > centers[i + 1]) i++;
-    const t = smoothstep(centers[i], centers[i + 1], p);
-    const a = this.camKeys[i];
-    const b = this.camKeys[i + 1];
-    const pos = a.pos.clone().lerp(b.pos, t);
-    const target = a.target.clone().lerp(b.target, t);
+    while (i < n - 2 && p > teaCenter(i + 1)) i++;
+    const a = teaCenter(i);
+    const b = teaCenter(i + 1);
+    const local = clamp01((p - a) / (b - a));
+    // Mostly linear so the camera keeps moving; a little ease lingers on each headline.
+    const eased = THREE.MathUtils.lerp(local, local * local * (3 - 2 * local), 0.4);
+    const u = (i + eased) / (n - 1);
+    const pos = this.camPath.getPoint(u);
+    const target = this.camAim.getPoint(u);
     if (this.narrow) {
-      // Phones: centre everything and pull back; copy sits above and below.
+      // Phones: centre everything and pull back; copy sits above.
       pos.x *= 0.15;
       target.x *= 0.15;
       pos.z += 4.5;
@@ -578,9 +766,10 @@ export class TeaEngine {
     const drop = smoothstep(0, 0.55, ph.pouch);
     const tip = smoothstep(0.4, 1, ph.pouch);
     const shake = Math.sin(t * 9) * 0.04 * tip * (1 - ph.pouchOut) * (ph.fall < 1 ? 1 : 0);
+    const away = smoothstep(0, 1, ph.pouchOut);
     this.pouch.position.set(
       THREE.MathUtils.lerp(0.4, -0.05, tip),
-      THREE.MathUtils.lerp(8.5, 3.45, drop) + ph.pouchOut * 6 + Math.sin(t * 1.1) * 0.03,
+      THREE.MathUtils.lerp(8.5, 3.45, drop) + away * 6 + Math.sin(t * 1.1) * 0.03,
       0.1,
     );
     this.pouch.rotation.set(0.1, -0.35 + tip * 0.2, tip * 2.55 + shake);
@@ -601,7 +790,7 @@ export class TeaEngine {
         continue;
       }
       const restY = L.float ? localLevel - 0.03 - L.s[0] * 0.05 : L.h;
-      const maxR = radiusAt(POT_BODY, Math.max(0.1, restY)) * 0.88;
+      const maxR = (radiusAt(POT_BODY, Math.max(0.1, restY)) - GLASS_WALL) * 0.86;
       const ang = L.a + swirl * (4 + L.s[1] * 4) + t * 0.05 * (0.3 + dance);
       const rad = maxR * L.r * (0.7 + 0.3 * Math.cos(swirl * 6 + L.s[2] * 6));
       const y = restY + dance * (0.25 + L.s[3] * 0.6) + Math.sin(t * 1.2 + L.a * 5) * 0.02 * (1 + dance);
@@ -634,6 +823,7 @@ export class TeaEngine {
     this.mint.position.x = -(1 - cupIn) * 5;
     for (const m of this.cupGlass) (m.material as THREE.ShaderMaterial).uniforms.uOpacity.value = cupIn;
     const flow = smoothstep(0.5, 0.62, ph.pour);
+    this.flow = flow;
     const cl = this.cupLiquid.uniforms;
     const fill = smoothstep(0.55, 1, ph.pour) * 0.95 + ph.calm * 0.05;
     const cupBottom = this.cup.position.y + 0.24 * CUP_SCALE;
@@ -644,7 +834,7 @@ export class TeaEngine {
     cl.uWave.value = flow * 2.5;
     cl.uOpacity.value = fill > 0.01 ? 1 : 0;
 
-    // Pour stream from the spout into the cup.
+    // Pour stream from the spout into the cup: thicker at the spout, wobbling as it falls.
     this.streamUniforms.uTime.value = t;
     this.streamUniforms.uFlow.value = flow;
     this.stream.visible = flow > 0.001;
@@ -652,10 +842,10 @@ export class TeaEngine {
       const tip3 = SPOUT_TIP.clone().applyMatrix4(this.pot.matrixWorld);
       const end = new THREE.Vector3(this.cup.position.x + 0.05, cl.uLevel.value, this.cup.position.z);
       const mid = tip3.clone().lerp(end, 0.5);
-      mid.x = tip3.x + (end.x - tip3.x) * 0.25;
+      mid.x = tip3.x + (end.x - tip3.x) * 0.25 + Math.sin(t * 3.1) * 0.01;
       const curve = new THREE.QuadraticBezierCurve3(tip3, mid, end);
       this.stream.geometry.dispose();
-      this.stream.geometry = new THREE.TubeGeometry(curve, 32, 0.045 + Math.sin(t * 20) * 0.003, 10, false);
+      this.stream.geometry = taperedTube(curve, 0.06, 0.036 + Math.sin(t * 17) * 0.003, 48);
     }
 
     // Steam.
@@ -681,14 +871,15 @@ export class TeaEngine {
     back.uniforms.uTime.value = t;
     back.uniforms.uWarm.value = ph.brew;
     const table = this.table.material as THREE.ShaderMaterial;
-    table.uniforms.uBrew.value = ph.brew * (1 - lift);
+    table.uniforms.uBrew.value = ph.brew;
     table.uniforms.uPool.value.set(this.pot.position.x * (1 - lift), 0, 0);
-    table.uniforms.uCupAmt.value = fill;
+    table.uniforms.uPotAmt.value = 1 - lift;
+    table.uniforms.uCupAmt.value = fill * cupIn;
     const dust = this.dust.material as THREE.ShaderMaterial;
     dust.uniforms.uTime.value = t;
     dust.uniforms.uOpacity.value = 0.35 + ph.brew * 0.3 + ph.calm * 0.35;
     this.vignette.uniforms.uTime.value = t % 10;
-    this.bloom.strength = 0.32 + ph.brew * 0.15;
+    this.bloom.strength = 0.3 + ph.brew * 0.15;
   }
 
   dispose() {

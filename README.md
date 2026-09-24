@@ -15,6 +15,17 @@ swirls and turns gold, and the pot pours into a cup:
 6. Poured, slowly
 7. Your moment of calm (with an Order on WhatsApp button)
 
+Glass and tea bend the light behind them (a refraction pass over the opaque
+scene), scrolling is smoothed with Lenis, and the camera glides along a spline
+through one viewpoint per section.
+
+**Sound:** subtle effects are generated in the browser with Web Audio, with no
+audio files: a soft whoosh that follows scroll speed, a quiet glass tap as
+each section arrives, and a trickle while the tea pours. Browsers only allow
+sound after a tap, click or key press, so it starts on the first one. The
+speaker button in the header mutes it, and the choice is remembered.
+See `src/components/tea/teaSound.ts`.
+
 ## Editing
 
 - All copy, the brand name and the WhatsApp number: `src/content/tea.ts`.

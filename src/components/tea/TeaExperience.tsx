@@ -1,10 +1,41 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Lenis from "lenis";
+import "lenis/dist/lenis.css";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { teaBrand, teaCta, teaNav, teaSections } from "@/content/tea";
 import { TEA_SCROLL_PAGES, TEA_STOPS, smoothstep, teaCopyState } from "@/lib/teaTimeline";
 import { cn } from "@/lib/utils";
 import type { TeaEngine } from "./teaEngine";
+import { TeaSound } from "./teaSound";
+
+// The visitor's mute choice lives in localStorage; this tiny store lets React read it
+// without a hydration mismatch (the server always assumes sound on).
+const SOUND_KEY = "kinari-sound";
+const SOUND_EVENT = "kinari-sound-change";
+const soundStore = {
+  subscribe(cb: () => void) {
+    window.addEventListener(SOUND_EVENT, cb);
+    window.addEventListener("storage", cb);
+    return () => {
+      window.removeEventListener(SOUND_EVENT, cb);
+      window.removeEventListener("storage", cb);
+    };
+  },
+  get() {
+    try {
+      return window.localStorage.getItem(SOUND_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  },
+  set(on: boolean) {
+    try {
+      window.localStorage.setItem(SOUND_KEY, on ? "on" : "off");
+    } catch {}
+    window.dispatchEvent(new Event(SOUND_EVENT));
+  },
+};
 
 declare global {
   interface Window {
@@ -16,6 +47,25 @@ function WhatsAppIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden className={className} fill="currentColor">
       <path d="M17.47 14.38c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.17-.17.2-.35.22-.65.07-.3-.15-1.26-.46-2.4-1.48-.89-.79-1.49-1.77-1.66-2.07-.17-.3-.02-.46.13-.61.13-.13.3-.35.45-.52.15-.17.2-.3.3-.5.1-.2.05-.37-.02-.52-.08-.15-.67-1.62-.92-2.22-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.8.37-.27.3-1.04 1.02-1.04 2.49s1.07 2.89 1.22 3.09c.15.2 2.1 3.2 5.08 4.49.71.31 1.26.49 1.7.63.71.23 1.36.2 1.87.12.57-.08 1.76-.72 2-1.41.25-.7.25-1.29.17-1.41-.07-.13-.27-.2-.57-.35zM12.04 21.5h-.01a9.4 9.4 0 0 1-4.8-1.32l-.34-.2-3.57.94.95-3.48-.22-.36a9.43 9.43 0 0 1-1.45-5.03c0-5.2 4.24-9.44 9.45-9.44 2.52 0 4.9.99 6.68 2.77a9.38 9.38 0 0 1 2.76 6.68c0 5.21-4.24 9.44-9.45 9.44zm8.04-17.48A11.3 11.3 0 0 0 12.04.7C5.77.7.67 5.8.67 12.07c0 2 .52 3.96 1.52 5.69L.57 23.7l6.08-1.6a11.33 11.33 0 0 0 5.39 1.37h.01c6.27 0 11.37-5.1 11.37-11.37 0-3.04-1.18-5.9-3.34-8.04z" />
+    </svg>
+  );
+}
+
+function SoundIcon({ on }: { on: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 5 6 9H2v6h4l5 4V5z" />
+      {on ? (
+        <>
+          <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+          <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+        </>
+      ) : (
+        <>
+          <path d="m22 9-6 6" />
+          <path d="m16 9 6 6" />
+        </>
+      )}
     </svg>
   );
 }
@@ -45,6 +95,18 @@ export function TeaExperience() {
   const [ready, setReady] = useState(false);
   const [capture, setCapture] = useState(false);
   const [webglError, setWebglError] = useState(false);
+  const soundOn = useSyncExternalStore(soundStore.subscribe, soundStore.get, () => true);
+  const soundRef = useRef<TeaSound | null>(null);
+
+  useEffect(() => {
+    soundRef.current?.setMuted(!soundOn);
+  }, [soundOn]);
+
+  const toggleSound = () => {
+    const next = !soundOn;
+    soundStore.set(next);
+    if (next) soundRef.current?.unlock();
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -54,6 +116,21 @@ export function TeaExperience() {
     const isCapture = new URLSearchParams(window.location.search).has("capture");
     const coarse = window.matchMedia("(pointer: coarse)").matches;
     const lite = coarse && (navigator.hardwareConcurrency ?? 8) <= 4;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Smooth scrolling; skipped for recording and for visitors who prefer less motion.
+    const lenis = isCapture || reducedMotion ? null : new Lenis({ duration: 1.25, smoothWheel: true, touchMultiplier: 1.2 });
+
+    // Sound starts on the first tap, click or key press (browsers block it before that).
+    const sound = isCapture ? null : new TeaSound();
+    soundRef.current = sound;
+    sound?.setMuted(!soundStore.get());
+    const unlock = () => {
+      if (soundStore.get()) sound?.unlock();
+    };
+    const gestures = ["pointerdown", "keydown", "touchend"] as const;
+    gestures.forEach((g) => window.addEventListener(g, unlock, { passive: true }));
+    let lastSection = -1;
 
     // Scroll position -> 0..1.
     const scrollProgress = () => {
@@ -75,15 +152,28 @@ export function TeaExperience() {
       });
       if (barRef.current) barRef.current.style.transform = `scaleX(${Math.max(0.02, p)})`;
       if (countRef.current) {
-        const i = Math.max(0, TEA_STOPS.findIndex((s) => p < s) - 1);
-        countRef.current.textContent = `${String(Math.min(i + 1, 7)).padStart(2, "0")} / 07`;
+        const next = TEA_STOPS.findIndex((s) => p < s);
+        const i = next === -1 ? TEA_STOPS.length - 2 : Math.max(0, next - 1);
+        countRef.current.textContent = `${String(i + 1).padStart(2, "0")} / 07`;
       }
       if (cueRef.current) cueRef.current.style.opacity = String(1 - smoothstep(0.01, 0.05, p));
     };
 
-    const overlayLoop = () => {
+    const overlayLoop = (time: number) => {
+      lenis?.raf(time);
       const engine = engineRef.current;
-      applyOverlay(engine ? engine.getProgress() : scrollProgress());
+      const p = engine ? engine.getProgress() : scrollProgress();
+      applyOverlay(p);
+      if (engine && sound) {
+        const { velocity, flow } = engine.getMotion();
+        sound.update(velocity, flow);
+        // A glass tap as each new section settles in.
+        const section = teaSections.findIndex((_, i) => teaCopyState(p, i).vis > 0.9);
+        if (section >= 0 && section !== lastSection) {
+          if (lastSection >= 0) sound.chime(section);
+          lastSection = section;
+        }
+      }
       raf = requestAnimationFrame(overlayLoop);
     };
 
@@ -139,6 +229,10 @@ export function TeaExperience() {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointer);
       document.removeEventListener("visibilitychange", onVisibility);
+      gestures.forEach((g) => window.removeEventListener(g, unlock));
+      lenis?.destroy();
+      sound?.dispose();
+      soundRef.current = null;
       engineRef.current?.dispose();
       engineRef.current = null;
       delete window.__tea;
@@ -173,12 +267,26 @@ export function TeaExperience() {
               </a>
             ))}
           </nav>
-          <a
-            href={waLink}
-            className="pointer-events-auto rounded-full border border-[#e7c27a]/60 px-5 py-2.5 text-[11px] uppercase tracking-[0.2em] text-[#f4ead9] transition-colors hover:bg-[#e7c27a] hover:text-[#1a1108]"
-          >
-            Order now
-          </a>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleSound}
+              aria-pressed={soundOn}
+              aria-label={soundOn ? "Sound on. Turn sound off" : "Sound off. Turn sound on"}
+              className={cn(
+                "pointer-events-auto grid size-11 place-items-center rounded-full border border-[#e7c27a]/40 text-[#f4ead9]/85 transition-colors hover:border-[#e7c27a] hover:text-[#e7c27a]",
+                capture && "hidden",
+              )}
+            >
+              <SoundIcon on={soundOn} />
+            </button>
+            <a
+              href={waLink}
+              className="pointer-events-auto rounded-full border border-[#e7c27a]/60 px-5 py-2.5 text-[11px] uppercase tracking-[0.2em] text-[#f4ead9] transition-colors hover:bg-[#e7c27a] hover:text-[#1a1108]"
+            >
+              Order now
+            </a>
+          </div>
         </header>
 
         {/* Section copy */}
