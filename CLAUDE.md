@@ -1,6 +1,6 @@
 @AGENTS.md
 
-Built with the kodexa-builder skill (v1.1.0). Load it for any new feature or
+Built with the kodexa-builder skill (v1.3.0). Load it for any new feature or
 design work, and log preferences, corrections and reversals to
 `.claude/kodexa-learnings.md` as they happen.
 

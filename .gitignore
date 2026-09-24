@@ -47,3 +47,6 @@ next-env.d.ts
 
 # Local temp files
 temp/
+
+# Unpacked skill update; the .skill file beside it is what gets installed
+.claude/kodexa-skill-update/kodexa-builder/
