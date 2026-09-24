@@ -67,6 +67,24 @@ npm run build && npx next start -p 3100
 npm run record:reel
 ```
 
+## /kettle: the vgpu experiment
+
+`/kettle` is a separate preview of the teapot built with
+[vgpu](https://vgpu.sh) (WebGPU). One WGSL shader,
+`src/components/kettle/kettle.wgsl`, ray traces the pot as a smooth distance
+field: light bends through the glass and the tea, reflects by Fresnel, and the
+tea absorbs colour by depth. Drag to turn it; sliders change the brew, level
+and lid. Browsers without WebGPU see a still.
+
+The same shader renders headless in Node, for stills and a turntable video:
+
+```bash
+npx vgpu doctor                      # needs a WebGPU adapter; on a machine
+                                     # without a GPU: npx vgpu install-software-renderer
+node --experimental-strip-types scripts/render-kettle.mts media/kettle
+node --experimental-strip-types scripts/render-kettle.mts media/kettle --video
+```
+
 ## Credits
 
 Photographed assets are from [Poly Haven](https://polyhaven.com) (CC0, free

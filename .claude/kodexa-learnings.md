@@ -25,6 +25,7 @@ for the rules.
 | L-007 | 2026-09-24 | correction | Physics must cover container motion (tilt) and whole-body containment at max size, proven by a scan | type: 3d-website | promoted v1.3.0 |
 | L-008 | 2026-09-24 | correction | Attached parts join cleanly (start inside, clip by body profile); connected vessels share one liquid level | type: 3d-website | promoted v1.3.0 |
 | L-009 | 2026-09-24 | rule | Iterate the site with screenshots; make slow derived outputs (videos) only when asked | all | promoted v1.3.0 |
+| L-011 | 2026-09-24 | gap | vgpu (WebGPU/WGSL) for a ray-traced hero object, verified by headless Node renders | type: 3d-website | logged |
 | L-010 | 2026-09-24 | correction | Scanned raw ginger root rejected; ingredients must look like what goes into the brew | project | project |
 
 ## Entries
@@ -108,3 +109,11 @@ for the rules.
 - **Scope:** project
 - **Target in skill:** none
 - **Status:** project
+
+### L-011 · 2026-09-24 · medium · gap
+- **Said / saw:** "https://vgpu.sh/ ...use this library to improve just the kettle for now, i want to see how it builds..."
+- **Context:** `/kettle` preview on branch claude/vgpu-kettle: one WGSL fragment shader ray traces an SDF teapot (smooth-blended spout and handle, real wall thickness, Snell refraction through glass and tea, Fresnel, Beer-Lambert), rendered with vgpu's `effect()`
+- **Lesson:** vgpu fits a single hero object that must look photoreal: SDF shapes give perfectly smooth, truly joined curves and per-pixel physical refraction that mesh shaders only approximate. Verify with `vgpu/node` headless renders (`npx vgpu doctor`, `npx vgpu install-software-renderer` on a GPU-less machine) because headless Chromium here cannot present WebGPU to a canvas at all (a raw one-triangle canvas test also fails). Compile before the first frame and fall back to a pre-rendered still. Keep the SDF cheap with bounding boxes around detailed parts; cost grows with every place the SDF is evaluated.
+- **Scope:** type: 3d-website
+- **Target in skill:** references/types/3d-website.md, section 1 (engine choice) and section 10
+- **Status:** logged (waiting for the user's verdict on the result)
