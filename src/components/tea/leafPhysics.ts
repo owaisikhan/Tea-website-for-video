@@ -41,6 +41,17 @@ export type SimResult = {
 };
 
 const G = 7;
+/** Largest size an ingredient reaches (leaves unfurl as they steep); containment uses it. */
+export const GROWTH = 1.25;
+/** Probe points in the ingredient's own frame: [axis, fraction of half-size, side]. */
+const PROBES: [number, number, number][] = [
+  [0, 1, -1],
+  [0, 1, 1],
+  [1, 0.5, -1],
+  [1, 0.5, 1],
+  [2, 0.5, -1],
+  [2, 0.5, 1],
+];
 
 export function simulateLeaves(inp: SimInput): SimResult {
   const n = inp.kinds.length;
@@ -72,6 +83,10 @@ export function simulateLeaves(inp: SimInput): SimResult {
   const tmp = new THREE.Vector3();
   const current = new THREE.Vector3();
   const dq = new THREE.Quaternion();
+  const axis = new THREE.Vector3();
+  const end = new THREE.Vector3();
+  const along = new THREE.Vector3();
+  const turn = new THREE.Quaternion();
   const flat = new THREE.Quaternion();
 
   let t = 0;
@@ -215,6 +230,47 @@ export function simulateLeaves(inp: SimInput): SimResult {
           normal.set(0, 0, 1).applyQuaternion(q[i]);
           flat.setFromUnitVectors(normal, normal.y >= 0 ? up : tmp.set(0, -1, 0)).multiply(q[i]);
           q[i].slerp(flat, Math.min(1, dt * 2));
+        }
+
+        // Whole-body containment: ends and edges of every piece (not just its centre) must stay
+        // inside the glass, so a cinnamon stick or a wide leaf can never poke through the wall.
+        if (wet[i] || (x.y < inp.rimY && Math.hypot(x.x, x.z) < inp.wallRadius(Math.max(x.y, inp.floorY)) + 0.05)) {
+          // Checked at full brewed size (leaves unfurl by up to a quarter in the hot water).
+          const half = inp.sizes[i] * 0.5 * GROWTH;
+          for (let pass = 0; pass < 3; pass++) {
+            for (const [ax, ext, sgn] of PROBES) {
+              axis.set(ax === 0 ? 1 : 0, ax === 1 ? 1 : 0, ax === 2 ? 1 : 0).applyQuaternion(q[i]);
+              end.copy(x).addScaledVector(axis, half * ext * sgn);
+              const ey = Math.min(inp.rimY, Math.max(end.y, inp.floorY));
+              const R = inp.wallRadius(ey) - 0.04;
+              const re = Math.hypot(end.x, end.z);
+              if (re > R && re > 1e-4) {
+                const nx = end.x / re;
+                const nz = end.z / re;
+                const excess = re - R;
+                x.x -= nx * excess;
+                x.z -= nz * excess;
+                const vr = vel.x * nx + vel.z * nz;
+                if (vr > 0) {
+                  vel.x -= nx * vr;
+                  vel.z -= nz * vr;
+                }
+                // Turn a long piece to lie along the glass instead of pointing into it.
+                if (ax === 0) {
+                  along.copy(axis).addScaledVector(tmp.set(nx, 0, nz), -(axis.x * nx + axis.z * nz));
+                  if (along.lengthSq() > 1e-6) {
+                    turn.setFromUnitVectors(axis, along.normalize());
+                    q[i].premultiply(turn.slerp(dq.identity(), 0.6)).normalize();
+                  }
+                }
+              }
+              const floorEnd = inp.floorY + 0.015;
+              if (end.y < floorEnd) x.y += floorEnd - end.y;
+              // Nothing climbs out over the collar.
+              const top = inp.rimY - 0.12;
+              if (end.y > top) x.y -= end.y - top;
+            }
+          }
         }
 
         // Integrate orientation.

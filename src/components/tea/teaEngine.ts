@@ -8,7 +8,7 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import { HDRLoader } from "three/examples/jsm/loaders/HDRLoader.js";
 import { clamp01, phases, pourFlow, range, smoothstep, teaCenter } from "@/lib/teaTimeline";
 import { buildLeafSet, type LeafSet } from "./leafModels";
-import { simulateLeaves, type Mouth, type SimResult } from "./leafPhysics";
+import { GROWTH, simulateLeaves, type Mouth, type SimResult } from "./leafPhysics";
 import {
   backdropShader,
   bubbleShader,
@@ -442,13 +442,15 @@ export class TeaEngine {
     this.scene.add(this.table);
 
     // Teapot: one thick glass shell, a spout that flares out of the body and a tapered handle.
+    // The spout starts well inside the belly, so its flared root is hidden by the body wall
+    // and it grows out of the side of the pot in one piece.
     const spoutCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(-0.95, 0.36, 0),
-      new THREE.Vector3(-1.3, 0.62, 0),
-      new THREE.Vector3(-1.62, 1.05, 0),
-      new THREE.Vector3(-1.86, 1.45, 0),
+      new THREE.Vector3(-0.72, 0.58, 0),
+      new THREE.Vector3(-1.12, 0.7, 0),
+      new THREE.Vector3(-1.5, 1.02, 0),
+      new THREE.Vector3(-1.84, 1.43, 0),
       SPOUT_TIP.clone(),
-    ]);
+    ], false, "centripetal");
     const spoutLip = new THREE.TorusGeometry(0.072, 0.018, 16, 64);
     spoutLip.applyQuaternion(
       new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), spoutCurve.getTangentAt(1)),
@@ -462,7 +464,7 @@ export class TeaEngine {
       new THREE.Vector3(1.5, 0.45, 0),
       new THREE.Vector3(1.02, 0.42, 0),
     ], false, "centripetal");
-    const spoutRadius = (t: number) => 0.072 + 0.2 * Math.pow(1 - t, 2.4);
+    const spoutRadius = (t: number) => 0.072 + 0.19 * Math.pow(1 - t, 2.6);
     const potParts: [THREE.BufferGeometry, { refract?: number; opacity?: number; clip?: boolean }][] = [
       [lathe(POT_SHELL, 1, 160), {}],
       [taperedTube(spoutCurve, spoutRadius), { clip: true }],
@@ -835,6 +837,44 @@ export class TeaEngine {
     }
   }
 
+  /**
+   * Scans the whole physics run for anything outside the glass: how far (scene units) the worst
+   * probe point of any ingredient pokes past the inner wall or under the inner floor.
+   */
+  containmentReport() {
+    const { frames, pos, quat } = this.sim;
+    const n = this.leafList.length;
+    const q = new THREE.Quaternion();
+    const a = new THREE.Vector3();
+    const e = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    let worst = 0;
+    let bad = 0;
+    for (let f = 0; f < frames; f += 2) {
+      const tSim = f / this.sim.fps;
+      for (let i = 0; i < n; i++) {
+        const L = this.leafList[i];
+        if (tSim < L.release) continue;
+        c.fromArray(pos, (f * n + i) * 3);
+        if (c.y > 1.8) continue; // still falling toward the pot
+        q.fromArray(quat, (f * n + i) * 4);
+        const half = L.size * 0.5 * GROWTH;
+        let over = 0;
+        for (const [ax, ext] of [[0, 1], [1, 0.5], [2, 0.5]]) {
+          for (const sgn of [-1, 1]) {
+            a.set(ax === 0 ? 1 : 0, ax === 1 ? 1 : 0, ax === 2 ? 1 : 0).applyQuaternion(q);
+            e.copy(c).addScaledVector(a, half * ext * sgn);
+            const R = radiusAt(POT_INNER, Math.min(1.8, Math.max(0.13, e.y)));
+            over = Math.max(over, Math.hypot(e.x, e.z) - R, 0.13 - e.y);
+          }
+        }
+        if (over > 0.005) bad++;
+        worst = Math.max(worst, over);
+      }
+    }
+    return { worst, bad };
+  }
+
   resize() {
     const w = this.renderer.domElement.clientWidth || window.innerWidth;
     const h = this.renderer.domElement.clientHeight || window.innerHeight;
@@ -1007,11 +1047,10 @@ export class TeaEngine {
       this.dummy.quaternion.copy(qa).slerp(qb, k);
       // Gentle drift once the leaves are in the water (time based, so it lives on after the run).
       if (this.dummy.position.y < WATER_LEVEL) {
-        this.dummy.position.y += Math.sin(t * 1.1 + i * 1.7) * 0.006;
-        this.dummy.position.x += Math.sin(t * 0.7 + i) * 0.004;
+        this.dummy.position.y += Math.sin(t * 1.1 + i * 1.7) * 0.004;
       }
       // Leaves unfurl a little as they steep.
-      const unfurl = L.kind === 2 ? 1 : 1 + ph.brew * 0.25;
+      const unfurl = L.kind === 2 ? 1 : 1 + ph.brew * (GROWTH - 1);
       this.dummy.scale.setScalar(L.size * unfurl * THREE.MathUtils.lerp(0.6, 1, clamp01(age / 0.12)));
       this.dummy.updateMatrix();
       mesh.setMatrixAt(L.index, this.dummy.matrix);

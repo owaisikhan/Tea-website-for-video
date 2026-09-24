@@ -39,7 +39,9 @@ const soundStore = {
 
 declare global {
   interface Window {
-    __tea?: { frame: (p: number, t: number) => void; soundtrack: (progress: number[], fps: number) => Promise<string> };
+    __tea?: { frame: (p: number, t: number) => void; soundtrack: (progress: number[], fps: number) => Promise<string>;
+      containment: () => { worst: number; bad: number };
+    };
   }
 }
 
@@ -198,6 +200,7 @@ export function TeaExperience() {
             },
             // The reel's audio: the same music, rendered offline for a scroll path.
             soundtrack: async (progress, fps) => wavBase64(await renderSoundtrack(progress, fps)),
+            containment: () => engine.containmentReport(),
           };
         } else {
           engine.setProgress(scrollProgress());
